@@ -1,0 +1,51 @@
+[project]
+name = "spacenavigator-mapper"
+dynamic = ["version"]
+description = "Map a 3Dconnexion SpaceNavigator's axes and buttons to keyboard input for games on Windows."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt5>=5.14",
+    "hidapi",
+    "pywinusb",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+spacenavigator-mapper = "spnav_mapper.bootstrap:launch"
+
+[tool.setuptools.dynamic]
+version = { attr = "spnav_mapper.version.VERSION" }
+
+[tool.setuptools.packages.find]
+include = ["spnav_mapper*"]
+
+[tool.setuptools.package-data]
+spnav_mapper = ["resources/*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = [
+    "E501",   # long QSS / message strings are clearer on one line
+    "E731",   # small lambdas assigned to names are used deliberately
+    "B904",   # raise ... from err: not needed for user-facing messages
+    "B905",   # zip() over consecutive points is intentionally non-strict
+    "UP006", "UP007", "UP035", "UP045",   # leave existing type hints as written
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/fakeqt.py" = ["E741", "UP031", "B004"]
+
+[tool.ruff.format]
+quote-style = "preserve"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

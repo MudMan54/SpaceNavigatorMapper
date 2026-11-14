@@ -13,8 +13,10 @@ with every update since. The user's README is the PDF reference manual,
   with Nuitka on a Windows runner — the same call as
   `BUILD_EXE_WINDOWS.bat` — refuses a tag that does not match
   `spnav_mapper/version.py`, and publishes a release with that version's
-  notes from this file and the EXE attached. "Run workflow" on the Actions
-  page builds the EXE without making a release. The app itself is unchanged.
+  notes from this file and the EXE attached. A release drafted on the
+  website with a new `v…` tag works too: the workflow adds the EXE and the
+  notes to it. "Run workflow" on the Actions page builds the EXE without
+  making a release. The app itself is unchanged.
 
 ## v108.175 — Ready for GitHub
 

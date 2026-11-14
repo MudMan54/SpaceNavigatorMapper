@@ -5,6 +5,17 @@ with every update since. The user's README is the PDF reference manual,
 `spnav_mapper/resources/SpaceNavigator_Mapper_README.pdf`: right-click the
 "SpaceNavigator Mapper" title in the app to open it.
 
+## v108.176 — Releases build themselves
+
+- **Pushing a version tag publishes the EXE.** A new GitHub Actions workflow
+  (`.github/workflows/release.yml`) runs on a tag such as `v108.176`: it
+  checks the code (ruff and the tests), builds `SpaceNavigatorMapper.exe`
+  with Nuitka on a Windows runner — the same call as
+  `BUILD_EXE_WINDOWS.bat` — refuses a tag that does not match
+  `spnav_mapper/version.py`, and publishes a release with that version's
+  notes from this file and the EXE attached. "Run workflow" on the Actions
+  page builds the EXE without making a release. The app itself is unchanged.
+
 ## v108.175 — Ready for GitHub
 
 - **MIT license.** The project now carries a `LICENSE` file (MIT, Don

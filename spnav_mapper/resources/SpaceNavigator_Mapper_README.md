@@ -1,7 +1,7 @@
 # SpaceNavigator Mapper — Full Editor README
 
 **Application:** SpaceNavigator Mapper (Windows / PyQt5)  
-**Version:** v108.175 (11/14/2026)  
+**Version:** v108.176 (11/14/2026)  
 **Purpose:** Map a 3Dconnexion SpaceNavigator's six motion axes and two hardware buttons to keyboard inputs.  
 **Interface covered:** the Full Editor, the application's only interface. Compact Mode was removed in v108.137.  
 **Logic by:** Don Muddiman  
@@ -245,7 +245,7 @@ The editor's title bar has no maximize button; a maximize from the keyboard (Win
 
 <!-- BEGIN FUNCTION REFERENCE: written by tools/build_readme_pdf.py -->
 
-The inventory lists every **top-level function and class method** of the `spnav_mapper` package of v108.175, with its source line and purpose (the first line of its docstring). It is written by `tools/build_readme_pdf.py` from the source, so it stays complete when the code changes. An underscore prefix means an internal helper or event handler; it does not imply a user-visible control. Nested callbacks are not listed. Line numbers refer to v108.175 and change in later releases.
+The inventory lists every **top-level function and class method** of the `spnav_mapper` package of v108.176, with its source line and purpose (the first line of its docstring). It is written by `tools/build_readme_pdf.py` from the source, so it stays complete when the code changes. An underscore prefix means an internal helper or event handler; it does not imply a user-visible control. Nested callbacks are not listed. Line numbers refer to v108.176 and change in later releases.
 
 **645 functions and methods in 42 modules.**
 

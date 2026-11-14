@@ -226,7 +226,9 @@ clicks through the menus, and records what a user would see and every key sent.
 `tests/test_session.py` checks those sessions, and `tests/test_noback.py`
 checks NoBack and Tick against the real axis code, and `tests/test_placement.py`
 checks placement on two monitors with different scale factors. GitHub Actions
-runs all of this on every push.
+runs all of this on every push, and pushing a version tag (for example
+`v108.176`) additionally builds `SpaceNavigatorMapper.exe` with Nuitka on a
+Windows runner and publishes it on the repository's Releases page.
 
 These tests don't replace trying a change on Windows with the device.
 Real Qt layout, fonts, multiple monitors, the tray and HID timing are only

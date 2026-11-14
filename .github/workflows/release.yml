@@ -1,0 +1,108 @@
+name: release
+
+# Pushing a version tag (git tag v108.176 && git push origin v108.176)
+# builds SpaceNavigatorMapper.exe with Nuitka on a Windows runner and
+# publishes it under Releases, with the version's CHANGELOG.md section as
+# the release notes. "Run workflow" (workflow_dispatch) only builds the
+# EXE and keeps it as a workflow artifact, with no release made.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pytest ruff
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: python -m pytest -q
+
+  build-windows-exe:
+    needs: checks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Nuitka cache (faster later builds)
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Nuitka
+          key: nuitka-${{ runner.os }}-py312-${{ hashFiles('requirements.txt') }}
+      - name: Install Nuitka and the app's packages
+        run: |
+          python -m pip install --upgrade nuitka zstandard
+          python -m pip install -r requirements.txt
+      - name: Read the version and check it matches the tag
+        id: version
+        shell: python
+        run: |
+          import os
+          import sys
+
+          sys.path.insert(0, ".")
+          from spnav_mapper.version import VERSION
+
+          parts = (VERSION.lstrip("v").split(".") + ["0"] * 4)[:4]
+          ref = os.environ.get("GITHUB_REF", "")
+          if ref.startswith("refs/tags/") and ref.removeprefix("refs/tags/") != VERSION:
+              sys.exit(f"The tag ({ref}) does not match spnav_mapper/version.py ({VERSION}).")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"app={VERSION}\nfile={'.'.join(parts)}\n")
+      # The same Nuitka call as BUILD_EXE_WINDOWS.bat, plus
+      # --assume-yes-for-downloads for the unattended runner.
+      - name: Compile with Nuitka
+        shell: cmd
+        run: >
+          python -m nuitka main.py
+          --onefile
+          --assume-yes-for-downloads
+          --windows-console-mode=disable
+          --enable-plugin=pyqt5
+          --include-data-dir=spnav_mapper\resources=spnav_mapper\resources
+          --windows-icon-from-ico=spnav_mapper\resources\SpaceNavigatorMapper.ico
+          --company-name="MudMan54"
+          --product-name="SpaceNavigator Mapper"
+          --file-description="SpaceNavigator Mapper"
+          --copyright="Don Muddiman"
+          --file-version=${{ steps.version.outputs.file }}
+          --product-version=${{ steps.version.outputs.file }}
+          --output-dir=build
+          --output-filename=SpaceNavigatorMapper.exe
+      - name: Keep the EXE as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpaceNavigatorMapper-${{ steps.version.outputs.app }}
+          path: build/SpaceNavigatorMapper.exe
+      - name: Release notes from the changelog
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: python
+        run: |
+          import re
+
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          version = "${{ steps.version.outputs.app }}"
+          found = re.search(rf"^## {re.escape(version)}[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+          body = found.group(1).strip() if found else "See CHANGELOG.md."
+          body += "\n\nThe EXE needs no install and no Python: put it in its own folder and run it. Windows SmartScreen may warn about an unsigned program the first time (More info > Run anyway)."
+          open("release_notes.md", "w", encoding="utf-8").write(body + "\n")
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          build/SpaceNavigatorMapper.exe
+          --title "SpaceNavigator Mapper ${{ github.ref_name }}"
+          --notes-file release_notes.md

@@ -24,7 +24,7 @@ SCREENS = [
     QScreen(D1, QRect(0, 0, 2560, 1440), QRect(0, 0, 2560, 1400), dpr=1.5),
     QScreen(D2, QRect(3840, 0, 1920, 1080), QRect(3840, 0, 1920, 1040), dpr=1.0),
 ]
-fakeqt.install(SCREENS)
+env = fakeqt.install(SCREENS)
 W32.monitors = [  # physical pixels
     (D1, 0, 0, 3840, 2160, 2100, 144, True),
     (D2, 3840, 0, 1920, 1080, 1040, 96, False),
@@ -614,7 +614,7 @@ def macro_bind_case():
         macro_editor.MacroEditor.exec_ = saved_exec
     panel.set_macro(0, [{"tap": ["q"]}, {"delay": 100}, {"tap": ["w"]}])
     button = panel.slot_btns[0]
-    label, tip = button.text(), button.toolTip().splitlines()[:4]
+    label, tip = button.text(), button.toolTip().splitlines()[:5]
     config = panel.get_config()["binds"][0]
     other = AxisPanel("Y", Window())
     other.set_config(panel.get_config())
@@ -629,6 +629,724 @@ def macro_bind_case():
         "loaded": [loaded["mode"], loaded["macro"], loaded["macro_repeat"], other.slot_btns[0].text()],
         "back to Hold": [button.text(), panel.binds[0]["macro"] != [], not panel.macro_group.isHidden()],
     }
+
+
+def bind_rebound_case():
+    """v108.177: the rebound settle guard in the Bind button's right-click menu, kept with the bind.
+    v108.178: named Rebound; the menu is brought up to date in place (it stays open).
+    v108.179: off until a time is chosen; "Rebound: Off" recommends 150 ms at once."""
+    from fakeqt import QMenu
+
+    from spnav_mapper.ui import tips
+    from spnav_mapper.ui.axis_panel import AxisPanel
+
+    win = Window()
+    win.setGeometry(100, 100, 900, 600)
+    win.show()
+    win._tips = tips.Tips(win, wrap_width=lambda: 300)
+    panel = AxisPanel("Z", win)
+    panel.setParent(win)
+
+    def entry(idx):
+        QMenu.CHOICES = []
+        panel._show_bind_menu(idx)
+        return next(a for a in panel._bind_menu.actions() if a.text().startswith("Rebound"))
+
+    def state(item):
+        return [item.text(), item.isEnabled(), [a.text() for a in item.menu().actions() if a.isChecked()]]
+
+    def seen(idx):
+        return state(entry(idx))
+
+    def popup():
+        label = win._tips.label
+        return label.text().split(".")[0] if label is not None and label.isVisible() else None
+
+    panel.binds[0].update(direction="Plus", combo=["c"], mode="Hold", min=37)
+    panel.binds[1].update(direction="Plus", combo=["ctrl"], mode="Hold", min=68)
+    panel.binds[2].update(direction="Plus", combo=["x"], mode="Tick", min=20)
+    panel.binds[3].update(direction="Full", combo=["y"], mode="Tick", min=20, settle_ms=150)
+    panel.binds[4].update(
+        direction="Minus", combo=["z"], mode="Hold", min=30, noback_minus=True, settle_ms=100
+    )
+    for i in range(5):
+        panel._refresh_slot_btn(i, force=True)
+    out = {"hold without noback": seen(0), "choices": [a.text() for a in entry(0).menu().actions()]}
+    # The pointer on a ghosted "Rebound: Off" (the bind has no use for it): no recommendation.
+    item = entry(0)
+    item.hovered.emit()
+    out["popup, no use for it"] = popup()
+    # The menu stays open: NoBack is clicked, then a Rebound time, and the same menu shows both.
+    menu = panel._bind_menu
+    noback = next(a for a in menu.actions() if a.text().startswith("NoBack"))
+    noback.trigger()
+    menu._spnav_refresh()
+    out["hold with noback"] = state(item)
+    # Now Rebound applies and is off: the pointer on it brings the recommendation up at once.
+    item.hovered.emit()
+    out["popup, off"] = popup()
+    out["popup beside the menu"] = win._tips.shown_at is not None
+    win._tips.hide_tip()
+    next(a for a in item.menu().actions() if a.text() == "250 ms").trigger()
+    menu._spnav_refresh()
+    out["same menu after 250 ms"] = state(item)
+    item.hovered.emit()
+    out["popup, time chosen"] = popup()
+    out["tick"] = seen(2)
+    next(a for a in entry(2).menu().actions() if a.text() == "150 ms").trigger()
+    out["after choosing"] = [seen(0), seen(2)]
+    next(a for a in entry(2).menu().actions() if a.text() == "Off").trigger()
+    out["off again"] = seen(2)
+    out["tips"] = [
+        [line for line in panel.slot_btns[i].toolTip().splitlines() if "Rebound" in line] for i in (0, 1, 2)
+    ]
+    out["menu tips"] = [entry(i).toolTip().split(":")[0].split(".")[0] for i in (0, 1, 2)]
+    out["recommended"] = [a.text() for a in entry(0).menu().actions() if "recommended" in a.toolTip()]
+    # The bouncing dot at the end of the button: on the side(s) Rebound works, none when off or unused.
+    dots = [getattr(button, "_rebound_dot", None) for button in panel.slot_btns[:6]]
+    out["dots"] = [[dot.sides(), bool(dot._wanted)] if dot is not None else None for dot in dots]
+    # v108.180: a button with the dot has blank space at both sides of its label, so the dot is
+    # clear of the text: the label's margin and the space together hold the dot and its gap.
+    from spnav_mapper.ui.title_effect import ReboundBounce
+
+    buttons = panel.slot_btns[:6]
+    out["side space"] = [button._side_space for button in buttons]
+    height = buttons[0].minimumHeight() or buttons[0].height()
+    out["room for the dot"] = [
+        button.margin() / 2.0 + button._side_space >= ReboundBounce.room(height)
+        for button in (buttons[0], buttons[3], buttons[4])
+    ]
+    # "C" and "CTRL" are both shorter than "Bind #6", the narrowest a label is taken to be.
+    out["wider by"] = buttons[0].sizeHint().width() - buttons[1].sizeHint().width()
+    saved = panel.get_config()["binds"]
+    out["saved"] = [bind.get("settle_ms") for bind in saved[:5]]
+    other = AxisPanel("Z", Window())
+    other.set_config(panel.get_config())
+    out["loaded"] = [bind["settle_ms"] for bind in other.binds[:5]]
+    old = {"binds": [dict(saved[0]), dict(saved[2])]}
+    for bind in old["binds"]:
+        bind.pop("settle_ms", None)
+    other.set_config(old)  # a profile from before v108.177
+    out["older profile"] = [bind["settle_ms"] for bind in other.binds[:2]]
+    other.reset_axis() if hasattr(other, "reset_axis") else None
+    out["new bind"] = other.binds[0]["settle_ms"]
+    return out
+
+
+def bind_copy_paste_case():
+    """v108.181: Copy and Paste on a Bind button's menu: all the bind's settings and its comment."""
+    from fakeqt import QMenu
+
+    from spnav_mapper import bind_copy
+    from spnav_mapper.ui import axis_panel
+    from spnav_mapper.ui.axis_panel import AxisPanel
+
+    bind_copy.clear()
+    said = []
+
+    class Bar:
+        def showMessage(self, text, _ms=0):
+            said.append(text)
+
+    win = Window()
+    win.statusBar = lambda: Bar()
+    edits = []
+    win.note_profile_edit = lambda: edits.append(1)
+    z, x = AxisPanel("Z", win), AxisPanel("X", win)
+
+    def items(panel, idx):
+        QMenu.CHOICES = []
+        panel._show_bind_menu(idx)
+        return {a.text(): a for a in panel._bind_menu.actions()}
+
+    out = {"menu": list(items(z, 1)), "paste before a copy": items(z, 1)["Paste"].isEnabled()}
+    out["undo before a paste"] = [
+        items(z, 1)["Undo Paste"].isEnabled(),
+        items(z, 1)["Undo Paste"].toolTip().split(":")[0],
+    ]
+    out["paste tip before"] = items(z, 1)["Paste"].toolTip().split(":")[0]
+    z.binds[1].update(
+        direction="Plus", combo=["ctrl", "c"], mode="Press/Repeat", min=37, max=66, dead=12, repeat_ms=140,
+        tap_ms=45, settle_ms=250, noback_plus=True, macro=[], macro_repeat=False,
+    )  # fmt: skip
+    z.slot_comments[1].setText("crouch")
+    z._refresh_slot_btn(1, force=True)
+    items(z, 1)["Copy"].trigger()
+    out["copied"] = [bind_copy.source(), said[-1], len(edits)]
+    # The copy is its own: changing the bind afterwards does not change it.
+    z.binds[1]["combo"].append("x")
+    z.binds[1]["min"] = 5
+    # Paste into another axis's bind that is holding its key down.
+    sent = []
+    saved_send = axis_panel.send_combo
+    axis_panel.send_combo = lambda combo, down, **_k: sent.append((list(combo), down))
+    try:
+        x.binds[3].update(direction="Minus", combo=["q"], mode="Hold", active=True, min=10, noback_minus=True)
+        x.selected_index = 3
+        x.slot_comments[3].setText("lean left")
+        before = x.get_config()["binds"][3]
+        target = items(x, 3)["Paste"]
+        out["paste after a copy"] = [target.isEnabled(), "Z Bind #2" in target.toolTip()]
+        target.trigger()
+    finally:
+        axis_panel.send_combo = saved_send
+    out["released"] = sent
+    pasted = x.get_config()["binds"][3]
+    out["pasted"] = pasted
+    out["state"] = [x.binds[3]["active"], x.slot_comments[3].text(), x.slot_btns[3].text()]
+    out["quick bind shows it"] = [x.qb_dir.currentData(), x.qb_mode.currentText()]
+    out["said"] = said[-1]
+    out["edits"] = len(edits)
+    out["other binds untouched"] = [bind.get("combo") for bind in x.binds[:3]] == [None, None, None]
+    out["tips"] = [line for line in x.slot_btns[3].toolTip().splitlines() if line.startswith("Right-click")]
+    # v108.182: Undo Paste, from any bind's menu (here another axis's): the bind is as it was.
+    undo = items(z, 0)["Undo Paste"]
+    out["undo after a paste"] = [undo.isEnabled(), "X Bind #4" in undo.toolTip()]
+    undo.trigger()
+    out["undone"] = [x.get_config()["binds"][3] == before, x.slot_comments[3].text(), x.slot_btns[3].text()]
+    out["undone, at rest"] = x.binds[3]["active"]
+    out["said after undo"] = said[-1]
+    out["edits after undo"] = len(edits)
+    out["undo once only"] = [items(z, 0)["Undo Paste"].isEnabled(), z._undo_paste()]
+    # A second paste gives the same again (the copy is not used up).
+    x._paste_bind(0)
+    out["again"] = x.get_config()["binds"][0] == pasted
+    # Loading the axis from a profile, or resetting it, leaves nothing to undo: its binds are other binds.
+    other_axis_load = z.get_config()
+    z.set_config(other_axis_load)
+    still = bind_copy.undo_name()
+    x.set_config(x.get_config())
+    out["forgotten on load"] = [still, bind_copy.undo_name()]
+    x._paste_bind(2)
+    x.reset_axis()
+    out["forgotten on reset"] = bind_copy.undo_name()
+    bind_copy.clear()
+    out["after clear"] = [x._paste_bind(1), items(x, 1)["Paste"].isEnabled()]
+    return out
+
+
+def bind_enabled_case():
+    """v108.183: Bind Enabled on a Bind button's menu: off, the bind keeps its settings and sends nothing."""
+    from fakeqt import QMenu
+
+    from spnav_mapper import bind_copy
+    from spnav_mapper.ui import axis_panel
+    from spnav_mapper.ui.axis_panel import AxisPanel
+
+    bind_copy.clear()
+    said = []
+
+    class Bar:
+        def showMessage(self, text, _ms=0):
+            said.append(text)
+
+    win = Window()
+    win.statusBar = lambda: Bar()
+    edits = []
+    win.note_profile_edit = lambda: edits.append(1)
+    z = AxisPanel("Z", win)
+
+    def items(idx):
+        QMenu.CHOICES = []
+        z._show_bind_menu(idx)
+        return {a.text(): a for a in z._bind_menu.actions()}
+
+    def look(idx):
+        button = z.slot_btns[idx]
+        style = button.styleSheet()
+        kind = {
+            z._style_off: "ghosted",
+            z._style_selected_off: "selected, ghosted",
+            z._style_selected: "selected",
+            z._style_bound_red: "bound",
+            z._style_gray: "empty",
+        }.get(style, "?")
+        lines = [getattr(button, name, None) for name in ("_dir_line", "_noback_glow", "_rebound_dot")]
+        return [kind, button.text(), [bool(line._wanted) if line is not None else None for line in lines]]
+
+    z.binds[1].update(
+        direction="Plus", combo=["c"], mode="Hold", min=37, noback_plus=True, settle_ms=150, active=True
+    )
+    z.slot_comments[1].setText("crouch")
+    z.selected_index = 0
+    z._refresh_slot_btn(0, force=True)
+    z._refresh_slot_btn(1, force=True)
+    first = items(1)
+    out = {"menu": list(first), "ticked": first["Bind Enabled"].isChecked(), "on": look(1)}
+    out["checkable"] = first["Bind Enabled"].isCheckable()  # so the menu stays open on a click
+    sent = []
+    saved_send = axis_panel.send_combo
+    axis_panel.send_combo = lambda combo, down, **_k: sent.append((list(combo), down))
+    try:
+        first["Bind Enabled"].trigger()  # the bind is holding its key: it lets go at once
+        z._bind_menu._spnav_refresh()
+        out["released"] = sent[:]
+        out["off"] = look(1)
+        out["unticked in the same menu"] = first["Bind Enabled"].isChecked()
+        out["said off"] = said[-1]
+        out["tip off"] = z.slot_btns[1].toolTip().splitlines()[:2]
+        saved = z.get_config()
+        out["saved"] = [bind.get("enabled") for bind in saved["binds"][:3]]
+        out["keeps its settings"] = [
+            saved["binds"][1][k] for k in ("combo", "mode", "min", "comment", "settle_ms")
+        ]
+        # It takes no part: the axis moves through its band and nothing is sent or lit.
+        z.mainwin.activated = True
+        for pct in (0, 20, 40, 60, 40, 20, 0):
+            z.update_val(pct / 100.0, True)
+        out["sent while off"] = sent[len(out["released"]) :]
+        # Selected, it is still marked as off.
+        z._select_slot(1)
+        out["selected while off"] = look(1)[0]
+        z._select_slot(0)
+        # Loaded from a profile it is still off; copied and pasted, the copy is off too.
+        other = AxisPanel("Z", win)
+        other.set_config(saved)
+        out["loaded"] = [bind["enabled"] for bind in other.binds[:3]]
+        items(1)["Copy"].trigger()
+        other._paste_bind(4)
+        out["pasted"] = other.binds[4]["enabled"]
+        # A profile from before has every bind on.
+        for bind in saved["binds"]:
+            bind.pop("enabled", None)
+        other.set_config(saved)
+        out["older profile"] = all(bind["enabled"] for bind in other.binds)
+        again = items(1)
+        out["menu shows it off"] = again["Bind Enabled"].isChecked()
+        again["Bind Enabled"].trigger()
+        out["on again"] = [
+            look(1),
+            z.binds[1]["enabled"],
+            said[-1],
+            z.get_config()["binds"][1].get("enabled"),
+        ]
+    finally:
+        axis_panel.send_combo = saved_send
+    out["edits"] = len(edits)
+    z.reset_axis()
+    out["after reset"] = all(bind["enabled"] for bind in z.binds)
+    bind_copy.clear()
+    return out
+
+
+def border_blink_case():
+    """v108.184: the panel border blinks whenever no keys are being sent (in Manual On too),
+    green for the axis moved the most; the Bind button's tip names the axis and the direction."""
+    from spnav_mapper.ui.axis_panel import AxisPanel
+    from spnav_mapper.ui.main_window import MainWindow
+
+    win = Window()
+    z, x = AxisPanel("Z", win), AxisPanel("X", win)
+
+    def colour(panel):
+        style = panel.styleSheet()
+        return style.split("solid ")[1].split(";")[0] if "solid" in style else None
+
+    def blink(panel, value, allow, top=None, activated=True):
+        win.activated = activated
+        win._top_axis = top
+        panel.update_val(value, allow)
+        running = panel._motion_timer.isActive()
+        seen = []
+        for _ in range(2):
+            if panel._motion_timer.isActive():
+                panel._toggle_motion_flash()
+            seen.append(colour(panel))
+        return [running, seen]
+
+    out = {}
+    # Manual On: the Target is on (activated) but the Mapper is in front, so nothing is sent.
+    out["manual on, mapper in front"] = blink(z, 0.5, False, top="Z")
+    out["another axis, moved less"] = blink(x, 0.2, False, top="Z")
+    # The keys are being sent (the target program in front): no blink, and a running one stops.
+    out["keys being sent"] = blink(z, 0.5, True, top="Z")
+    out["target off"] = blink(x, 0.5, False, top="X", activated=False)
+    out["inside the dead zone"] = blink(AxisPanel("Y", win), 0.01, False, top=None)
+    # Which axis is moved the most: beyond its dead zone, the largest; none when all are at rest.
+
+    class Device:
+        axes = [0.0] * 6
+
+    class Stub:
+        spnav = Device()
+        axes = {name: AxisPanel(name, win) for name in ("X", "Y", "Z", "Rx", "Ry", "Rz")}
+
+    stub = Stub()
+    most = []
+    for values in (
+        [0, 0, 0, 0, 0, 0],
+        [0.2, -0.6, 0.3, 0, 0, 0],
+        [0.04, 0.03, 0, 0, 0, 0],
+        [0.1, 0, 0, 0, 0, -0.1],
+    ):
+        Device.axes = values
+        most.append(MainWindow._axis_moved_most(stub))
+    out["moved most"] = most
+    # A Bind button's tip: the axis and the direction in its top line, kept up to date.
+    tops = []
+    for direction in (None, "Plus", "Minus", "Full"):
+        z.binds[2]["direction"] = direction
+        z._refresh_slot_btn(2, force=True)
+        tops.append(z.slot_btns[2].toolTip().splitlines()[0])
+    out["tip top lines"] = tops
+    # The Bind button's own blink (its band reached, nothing being sent) follows the same rule.
+    pulses = []
+    z._pulse_bind_button = lambda idx: pulses.append(idx)
+    z.binds[0].update(direction="Plus", combo=["c"], mode="Hold", min=10, max=100)
+    win.activated = True
+    z.update_val(0.5, False)
+    quiet = len(pulses)
+    z.update_val(0.5, True)
+    out["bind blink"] = [quiet > 0, len(pulses) == quiet]
+    # v108.185: the Bind button blinks grey in step with the border while its band is reached,
+    # instead of flickering on every tick; it is its own style again at once when the band is left.
+    y = AxisPanel("Y", win)
+    y.binds[0].update(direction="Plus", combo=["c"], mode="Hold", min=10, max=100)
+    y.binds[1].update(direction="Plus", combo=["v"], mode="Tick", min=60)
+    for i in (0, 1):
+        y._refresh_slot_btn(i, force=True)
+    own = [y.slot_btns[i].styleSheet() for i in (0, 1)]
+
+    def greys():
+        return [y.slot_btns[i].styleSheet() == y._style_gray for i in (0, 1)]
+
+    steps = []
+    changes, last = 0, y.slot_btns[0].styleSheet()
+    for tick in range(30):  # half a second held in the first bind's band
+        y.update_val(0.4, False)
+        if tick % 8 == 7:  # the border's timer, every 120 ms
+            y._toggle_motion_flash()
+            steps.append(greys())
+        if y.slot_btns[0].styleSheet() != last:
+            changes, last = changes + 1, y.slot_btns[0].styleSheet()
+    out["blinks with the border"] = steps
+    out["style changes in half a second"] = changes
+    out["blinking"] = sorted(y._band_blink)
+    y.update_val(0.8, False)  # the Tick's band too
+    y._toggle_motion_flash() if not y._motion_flash_on else None
+    out["both in their bands"] = [sorted(y._band_blink), greys()]
+    y.update_val(0.3, False)  # the Tick's band is left: its own style at once
+    out["one band left"] = [sorted(y._band_blink), greys()]
+    y.update_val(0.3, True)  # the keys are being sent now: no blink at all
+    out["keys being sent again"] = [
+        sorted(y._band_blink),
+        [y.slot_btns[i].styleSheet() == own[i] for i in (0, 1)],
+    ]
+    # Reset gives each bind its DZone back too (it kept the one it had, 0% included), so a bind
+    # just reset is not reached with the puck at rest, and its button does not blink there.
+    r = AxisPanel("Rz", win)
+    r.binds[1]["dead"] = 0
+    r.binds[3]["dead"] = 40
+    r.reset_axis()
+    out["DZone after reset"] = sorted({bind["dead"] for bind in r.binds})
+    r.binds[1]["combo"] = ["c"]  # a key picked for the bind just reset
+    r._refresh_slot_btn(1, force=True)
+    resting, last = 0, r.slot_btns[1].styleSheet()
+    for _ in range(60):
+        r.update_val(0.0, False)
+        if r._motion_timer.isActive():
+            r._toggle_motion_flash()
+        if r.slot_btns[1].styleSheet() != last:
+            resting, last = resting + 1, r.slot_btns[1].styleSheet()
+    out["at rest after reset"] = [resting, sorted(r._band_blink), r._motion_timer.isActive()]
+    return out
+
+
+def history_pause_case():
+    """v108.186: Pause freezes a copy of the view; the rolling window no longer eats it."""
+    from spnav_mapper.ui.axis_history_window import show_axis_history
+    from spnav_mapper.ui.axis_panel import AxisPanel
+
+    win = Window()
+    win.axes = {name: AxisPanel(name, win) for name in ("X", "Y", "Z", "Rx", "Ry", "Rz")}
+    window = show_axis_history(win, "Z")
+    z = win.axes["Z"]
+    z.binds[1].update(direction="Plus", combo=["ctrl"], mode="Tick", min=68, tap_ms=45)
+    win.activated = True
+    # Twelve seconds of strokes, 16 ms a sample; KEEP_S is 10 s (v108.187; 30 s before).
+    for second in range(12):
+        for tick in range(62):
+            env.advance(16)
+            z.update_val(0.8 if tick < 10 and second % 3 == 0 else 0.0, True)
+    live = z.history
+    taps = [e for e in live.events if e[1] == "tap"]
+    out = {"taps before pause": len(taps)}
+    window.toggle_pause()
+    view_at_pause = window.view("Z")
+    out["paused view"] = [len(view_at_pause[0]) > 0, len(view_at_pause[1])]
+    # Half a minute more of recording while paused: the live window rolls past the pause.
+    scrolled = window.time_bar.value()
+    window.time_bar.setValue(window.time_bar.minimum())  # v108.187: back over the 10 s kept
+    out["scrolled back"] = [window.ago(), len(window.view("Z")[1]), len(window.capture("Z")[1])]
+    window.time_bar.setValue(scrolled)
+    for _ in range(31 * 62):
+        env.advance(16)
+        z.update_val(0.0, True)
+    out["live rolled on"] = [len(live.span(live.clock(), 30.0)[1]), len(live.samples) > 0]
+    after = window.view("Z")
+    out["paused view unchanged"] = after == view_at_pause
+    out["summary still has the taps"] = (
+        f"tapped {out['paused view'][1]}×" in window.summary_label.text()
+        if hasattr(window, "summary_label")
+        else None
+    )
+    window.toggle_pause()
+    resumed = window.view("Z")
+    out["resume returns to live"] = [len(resumed[1]), resumed != view_at_pause]
+    window.toggle_pause()
+    window.clear() if hasattr(window, "clear") else None
+    return out
+
+
+def history_monitor_case():
+    """v108.189: Axis History opens attached on the monitor Windows has the editor on, not the one Qt names."""
+    from spnav_mapper.ui import axis_history_window as module
+    from spnav_mapper.ui.axis_panel import AxisPanel
+
+    reset()
+    display_preferences.update_preference(module.VIEW_PREFERENCE, None)  # no place remembered yet
+    W32.window_monitor = D2
+    win = Window()
+    win.axes = {name: AxisPanel(name, win) for name in ("X", "Y", "Z", "Rx", "Ry", "Rz")}
+    win.show()
+    win.windowHandle().setScreen(SCREENS[0])  # Qt names the 150% monitor
+    win.setGeometry(3840 + 500, 200, 300, 400)
+    before = win.geometry()
+    window = module.show_axis_history(win, "Z")
+    editor, beside = win.geometry(), window.geometry()
+    out = {
+        "screen": window._screen().name(),
+        "qt names": win.windowHandle().screen().name(),
+        "editor": [editor.x(), editor.y(), editor.width(), editor.height()],
+        "history": [beside.x(), beside.y(), beside.width(), beside.height()],
+        "notes": [n for n in NOTES if "Axis History attached" in n],
+    }
+    window.close()
+    after = win.geometry()
+    out["editor back"] = [after.x(), after.y()] == [before.x(), before.y()]
+    out["spots"] = sorted(module.read_preferences().get(module.VIEW_PREFERENCE, {}).get("editor_spots", {}))
+    module.set_axis_history(win, False)
+    return out
+
+
+def rebound_dot_case():
+    """v108.179: the dot falls from the top and bounces on the bottom, each bounce lower, and rests there."""
+    from fakeqt import QPushButton
+
+    from spnav_mapper.ui.title_effect import LINE_ATTRIBUTES, ReboundBounce
+
+    button = QPushButton("Bind #1")
+    button.resize(120, 40)
+    dot = ReboundBounce(button)
+    dot.setGeometry(0, 0, 120, 40)
+    dot.set_sides("+-")
+    out = {"attribute": "_rebound_dot" in LINE_ATTRIBUTES, "sides": dot.sides()}
+    out["at rest"] = list(dot.bounce())  # the pointer is not over the window
+    out["at rest spots"] = [[round(v, 1) for v in spot] for spot in dot.spots()]
+    path = []
+    for step in range(0, 101, 1):
+        dot.set_hover_phase(True, step / 100.0 * 0.999)
+        height, alpha = dot.bounce()
+        path.append((round(height, 3), alpha))
+    share, bounces = ReboundBounce.BOUNCE_SHARE, ReboundBounce.BOUNCES
+    out["starts at the top"] = path[0][0]
+    out["rests at the bottom"] = [h for h, _a in path if h][-1] < 0.05 and path[-1][0] == 0.0
+    out["fades at rest"] = path[-1][1] < path[80][1] <= 255
+    # The height of each bounce: at 1/4, 2/4 and 3/4 of the bouncing time.
+    tops = []
+    for k in range(1, bounces):
+        dot.set_hover_phase(True, share * k / bounces)
+        tops.append(round(dot.bounce()[0], 3))
+    out["bounce heights"] = tops
+    hits = []
+    for k in range(bounces):
+        dot.set_hover_phase(True, share * (k + 0.5) / bounces)
+        hits.append(round(dot.bounce()[0], 3))
+    out["touches the bottom"] = hits
+    # It moves up and down only: the same x at the top and at the bottom, at each end.
+    dot.set_hover_phase(True, 0.0)
+    top = dot.spots()
+    dot.set_hover_phase(True, share * 0.5 / bounces)
+    bottom = dot.spots()
+    out["up and down only"] = [a[0] == b[0] and a[1] < b[1] for a, b in zip(top, bottom, strict=True)]
+    out["ends"] = [round(spot[0], 1) for spot in top]
+    out["inside the button"] = all(0 < s[1] - s[2] and s[1] + s[2] < 40 for s in top + bottom)
+    dot.set_sides("")
+    out["no side"] = dot.spots()
+    return out
+
+
+def menus_stay_open_case():
+    """v108.178: a click on a setting leaves its drop-down open; a pop-up menu closes once the mouse has left."""
+    from fakeqt import QAction, QCursor, QEvent, QMenu, QPoint, QRect, Qt
+
+    from spnav_mapper.ui import menu_autoclose
+
+    class Click:
+        def __init__(self, at, button=Qt.LeftButton, kind=QEvent.MouseButtonRelease):
+            self._at, self._button, self._kind = at, button, kind
+
+        def type(self):
+            return self._kind
+
+        def button(self):
+            return self._button
+
+        def pos(self):
+            return self._at
+
+    menu = QMenu("Options")
+    setting = menu.addAction("Device LED")
+    setting.setCheckable(True)
+    command = menu.addAction("Exit SpaceNavigator Mapper")
+    window_item = menu_autoclose.closes_menu(menu.addAction("Axis History"))
+    window_item.setCheckable(True)
+    off = menu.addAction("Running as Administrator")
+    off.setCheckable(True)
+    off.setEnabled(False)
+    sub = menu.addMenu("Load Backup")
+    rows = {id(a): a for a in menu.actions()}
+    menu.actionAt = lambda at: {0: setting, 1: command, 2: window_item, 3: off, 4: sub.menuAction()}.get(at)
+    refreshed = []
+    menu._spnav_refresh = lambda: refreshed.append("menu")
+    stay = menu_autoclose.StayOpen()
+    stay.watch(menu)
+    out = {
+        "watched": [bool(menu.property(menu_autoclose.WATCHED)), bool(sub.property(menu_autoclose.WATCHED))]
+    }
+    out["setting"] = [stay.eventFilter(menu, Click(0)), setting.isChecked(), list(refreshed)]
+    out["setting again"] = [stay.eventFilter(menu, Click(0)), setting.isChecked()]
+    out["others"] = {
+        "command": stay.eventFilter(menu, Click(1)),
+        "opens a window": stay.eventFilter(menu, Click(2)),
+        "disabled": stay.eventFilter(menu, Click(3)),
+        "submenu": stay.eventFilter(menu, Click(4)),
+        "no item": stay.eventFilter(menu, Click(9)),
+        "right button": stay.eventFilter(menu, Click(0, Qt.RightButton)),
+        "press": stay.eventFilter(menu, Click(0, kind=QEvent.MouseButtonPress)),
+    }
+    out["untouched"] = [setting.isChecked(), window_item.isChecked(), off.isChecked()]
+    assert rows
+    # A Bind button's menu: nothing closes before the mouse has been over it; then 0.4 s after it left.
+    popup = QMenu("bind")
+    now = [0.0]
+    watcher = menu_autoclose.MenuAutoClose(None, clock=lambda: now[0], popup=popup)
+
+    class Open:
+        shown = True
+
+        def geometry(self):
+            return QRect(200, 100, 160, 120)
+
+        def isVisible(self):
+            return self.shown
+
+        def hide(self):
+            self.shown = False
+
+    opened = Open()
+    watcher.open_menus = lambda: [opened] if opened.shown else []
+    saved_pos = QCursor._pos
+    try:
+        popup.aboutToShow.emit()
+        steps = []
+        for x, y, later in (
+            (150, 110, 1.0),
+            (150, 110, 1.0),
+            (250, 150, 0.1),
+            (500, 400, 0.1),
+            (500, 400, 0.5),
+        ):
+            now[0] += later
+            QCursor._pos = QPoint(x, y)
+            steps.append([watcher.check(), opened.shown])
+        out["popup"] = steps
+    finally:
+        QCursor._pos = saved_pos
+    out["action"] = isinstance(setting, QAction)
+    return out
+
+
+def tips_case():
+    """v108.178: the Mapper's own tip window: where it goes, what it shows and when it leaves."""
+    from fakeqt import QCursor, QEvent, QFont, QLabel, QMenu, QPoint, QPushButton
+
+    from spnav_mapper.ui import tips
+
+    win = Window()
+    win.setGeometry(100, 100, 900, 600)
+    win.show()
+    font = QFont()
+    font.setPointSizeF(11.0)
+    shown = tips.Tips(win, font=lambda: font, wrap_width=lambda: 300)
+    button = QPushButton("Save as", win)
+    button.setGeometry(400, 200, 80, 30)
+    button.setToolTip("Save these settings as a new profile.")
+    plain = QLabel("no tip", win)
+    plain.setGeometry(10, 10, 50, 20)
+
+    class Due:  # Qt's ToolTip event
+        def __init__(self, at=None):
+            self._at = at or QPoint(5, 5)
+
+        def type(self):
+            return QEvent.ToolTip
+
+        def pos(self):
+            return self._at
+
+    class Other:
+        def __init__(self, kind, at=None):
+            self._kind, self._at = kind, at
+
+        def type(self):
+            return self._kind
+
+        def globalPos(self):
+            return self._at
+
+    saved_pos = QCursor._pos
+    out = {}
+    try:
+        corner = button.mapToGlobal(QPoint(0, 0))
+        QCursor._pos = QPoint(corner.x() + 5, corner.y() + 5)
+        out["nothing to show"] = shown.eventFilter(plain, Due())
+        out["handled"] = shown.eventFilter(button, Due())
+        label = shown.label
+        out["text"] = label.text()
+        out["font"] = label.font().pointSizeF()
+        out["visible"] = label.isVisible()
+        out["beside the button"] = [
+            shown.shown_at[0] - (corner.x() + 80),  # the gap after its right edge
+            shown.shown_at[1] - corner.y(),
+        ]
+        out["again is the same tip"] = [shown.eventFilter(button, Due()), label.isVisible()]
+        inside = QPoint(corner.x() + 40, corner.y() + 10)
+        shown.eventFilter(win, Other(QEvent.MouseMove, inside))
+        out["stays while over the button"] = label.isVisible()
+        shown.eventFilter(win, Other(QEvent.MouseMove, QPoint(corner.x() - 30, corner.y())))
+        out["leaves with the pointer"] = [label.isVisible(), shown.probe.isActive()]
+        shown.eventFilter(button, Due())
+        shown.eventFilter(win, Other(QEvent.KeyPress))
+        out["leaves on a key"] = [label.isVisible(), shown.anchor is None]
+        # A long tip is wrapped at the comment box's width.
+        button.setToolTip("word " * 60)
+        shown.eventFilter(button, Due())
+        out["wrapped"] = [label.wordWrap(), label.minimumWidth(), label.maximumWidth()]
+        out["inside the window"] = shown.shown_at[0] >= 100 and shown.shown_at[0] + 300 <= 1000
+        shown.hide_tip()
+        # A drop-down's item: the tip goes beside the drop-down, not over it.
+        menu = QMenu("Options", win)
+        menu.setToolTipsVisible(True)
+        item = menu.addAction("Device LED")
+        item.setToolTip("Switch the SpaceNavigator's LED on or off.")
+        bare = menu.addAction("Bare")
+        out["menu"] = [type(shown.target(menu, QPoint(3, 3))).__name__, bare.text()]
+        out["show time"] = [tips.show_time_ms("x" * 50), tips.show_time_ms("x" * 200)]
+    finally:
+        QCursor._pos = saved_pos
+        shown.hide_tip()
+    return out
 
 
 def key_picker_case():
@@ -1322,6 +2040,15 @@ results = {
     "tray menu": tray_menu_case(),
     "macro editor": macro_editor_case(),
     "macro bind": macro_bind_case(),
+    "bind rebound": bind_rebound_case(),
+    "rebound dot": rebound_dot_case(),
+    "bind copy and paste": bind_copy_paste_case(),
+    "bind enabled": bind_enabled_case(),
+    "border blink": border_blink_case(),
+    "history pause": history_pause_case(),
+    "history monitor": history_monitor_case(),
+    "menus stay open": menus_stay_open_case(),
+    "tips": tips_case(),
     "key picker": key_picker_case(),
     "device presence": device_presence_case(),
     "fit to the screen": fit_to_screen_case(),

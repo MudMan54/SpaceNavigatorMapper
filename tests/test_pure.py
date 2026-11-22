@@ -244,7 +244,7 @@ def test_axis_history_keys_not_sent():
         "Peak +60%, −0% · Bind #1 tapped 1× · Bind #1 tapped 1× (not sent) · Bind #2 pressed 1× (not sent)"
     )
     rows = axis_history.csv_rows([("X", samples, events)])
-    assert ("X", "0.500", "30.0", "tap (not sent)", "Bind #1", "A") in rows
+    assert ("X", "0.500", "30.0", "tap (not sent)", "Bind #1", "A", "") in rows
     shapes = axis_history.drawing(samples, events, [], 5, clock[0], 10, 456, 240)
     # v108.159: in the bind's colour, hollow when not sent
     assert [s[4:] for s in shapes if s[0] == "circle"] == [
@@ -295,16 +295,35 @@ def test_axis_history_window_view_and_size():
 
     assert ahw.load_view({}) == ahw.DEFAULT_VIEW
     assert ahw.load_view("junk") == ahw.DEFAULT_VIEW
+    # v108.187: attached to the editor unless unticked; the time span is no longer a choice
+    # (a "seconds" remembered by an older version is dropped).
+    assert ahw.DEFAULT_VIEW["attached"] is True and "seconds" not in ahw.DEFAULT_VIEW
     view = ahw.load_view(
-        {"axes": ["Rz", "X", "Q"], "together": 1, "seconds": 30, "text_size": 1.6, "size": [1200, 700]}
+        {
+            "axes": ["Rz", "X", "Q"],
+            "together": 1,
+            "seconds": 30,
+            "text_size": 1.6,
+            "size": [1200, 700],
+            "attached": 0,
+            "legend": 1,
+        }
     )
     assert view == {
         "axes": ["X", "Rz"],
         "together": True,
-        "seconds": 30,
         "text_size": 1.5,
         "size": [1200, 700],
+        "attached": False,
+        "legend": True,
+        "editor_spots": {},
     }
+    # v108.188: the editor's remembered places, per monitor; one that makes no sense is dropped.
+    spots = ahw.load_view(
+        {"editor_spots": {"A": [10, 20, None, None], "B": "x", "C": [1, 2, 300, 400], "D": [1, 2, 3]}}
+    )["editor_spots"]
+    assert spots == {"A": [10, 20, None, None], "C": [1, 2, 300, 400]}
+    assert ahw.load_view({})["editor_spots"] is not ahw.DEFAULT_VIEW["editor_spots"]
     assert ahw.load_view({"axes": [], "seconds": 7, "size": [10, 10]})["axes"] == ["X"]
     assert ahw.load_view({"seconds": 7, "size": [10, 10]})["size"] is None
     # 80% of the screen at first; a remembered size, but never larger than the screen.
@@ -540,16 +559,18 @@ def test_axis_history_bands_summary_and_csv():
     )
     assert axis_history.summary([], []) == "Nothing recorded yet: move the axis."
     rows = axis_history.csv_rows([("X", samples, events)])
-    assert rows[0] == ("axis", "time_s", "value_percent", "event", "bind", "key")
-    assert rows[1] == ("X", "0.000", "0.0", "", "", "")
-    assert ("X", "0.500", "30.0", "down", "Bind #1", "A") in rows
-    assert ("X", "1.500", "10.0", "held by NoBack", "Bind #1", "A") in rows
+    # v108.187: the last column, held_ms (see test_axis_history_hold_times_and_key_log).
+    assert rows[0] == ("axis", "time_s", "value_percent", "event", "bind", "key", "held_ms")
+    assert rows[1] == ("X", "0.000", "0.0", "", "", "", "")
+    assert ("X", "0.500", "30.0", "down", "Bind #1", "A", "") in rows
+    assert ("X", "1.500", "10.0", "held by NoBack", "Bind #1", "A", "") in rows
     assert len(rows) == 1 + 6 + 4
     # v108.155: several axes in one file, in time order, timed from the first.
     later = [(t + 0.25, v) for t, v in samples[:2]]
     both = axis_history.csv_rows([("X", samples, events), ("Ry", later, [])])
     assert len(both) == 1 + 6 + 4 + 2
-    assert both[1] == ("X", "0.000", "0.0", "", "", "") and both[2] == ("Ry", "0.250", "0.0", "", "", "")
+    assert both[1] == ("X", "0.000", "0.0", "", "", "", "")
+    assert both[2] == ("Ry", "0.250", "0.0", "", "", "", "")
     assert axis_history.csv_rows([("X", [], []), ("Y", [], [])]) == [rows[0]]
 
 
@@ -924,3 +945,433 @@ def test_a_group_without_patterns_matches_no_program(tmp_path):
     # Before v108.170 it matched every program, and its profiles were loaded for all of them.
     assert manager.pick_profile_for("anything.exe", "Some window", "") == ""
     assert manager.candidates_for_current("anything.exe", "", "") == []
+
+
+# --- Settle: the spring's bounce is not a new push (v108.177) -------------------
+def test_settle_guard_holds_a_bind_through_the_bounce_only():
+    from spnav_mapper.settle import SettleGuard
+
+    guard, held = SettleGuard(), []
+
+    def at(ms, magnitude, higher=False):
+        held.append(guard.sample(ms / 1000.0, magnitude, 37, higher, 150))
+
+    at(0, 40)  # the way out: past the bind's start
+    at(16, 80, higher=True)  # ... and into the higher band, on the same push
+    assert held == [False, False]  # the way out is never held
+    at(32, 20)  # let go: below the bind's start
+    at(96, 42)  # the bounce, 64 ms later
+    assert held[-1] is True
+    at(112, 10)  # below again: the rest starts over
+    at(250, 45)  # 138 ms later: still too soon
+    assert held[-1] is True
+    at(266, 0)
+    at(420, 45)  # after more than 150 ms at rest: a hand's push
+    assert held[-1] is False and guard.armed is False
+    at(432, 30)
+    at(448, 45)  # nothing higher was reached since: free to start at once
+    assert held[-1] is False
+
+
+def test_settle_guard_counts_the_rest_between_samples_and_at_the_centre():
+    from spnav_mapper.settle import SettleGuard, clamp_settle_ms, settle_text
+
+    guard = SettleGuard()
+    guard.sample(0.0, 80, 37, True, 150)
+    guard.sample(0.016, 0, 37, False, 150)  # at the centre (or on the other side)
+    # No sample while it rested: the rest is measured up to the next one.
+    assert guard.sample(0.5, 45, 37, False, 150) is False
+    # A bind that starts at 0 can only rest at the centre.
+    zero = SettleGuard()
+    zero.sample(0.0, 50, 0, True, 150)
+    assert zero.sample(0.016, 5, 0, False, 150) is True
+    zero.sample(0.032, 0, 0, False, 150)
+    assert zero.sample(0.2, 5, 0, False, 150) is False
+    # v108.179: off unless a time is given (150 ms in the v108.177/178 tests).
+    assert [clamp_settle_ms(v) for v in (None, "x", -5, 0, 120, 9999)] == [0, 0, 0, 0, 120, 500]
+    assert [settle_text(v) for v in (0, 150)] == ["Off", "150 ms"]
+
+
+def test_axis_history_rebound_mark():
+    from spnav_mapper import axis_history
+
+    events = [(1.0, "tap", 0, "C", 0.4), (1.5, "rebound-held", 0, "C", 0.42)]
+    line = axis_history.summary([(0.0, 0.0), (1.0, 0.8)], events)
+    assert line.endswith("Bind #1 tapped 1× · Rebound held 1×")
+    assert axis_history.unsent("rebound-held") == "rebound-held"  # nothing was sent either way
+    assert axis_history.EVENT_TEXT["rebound-held"] == "held by Rebound"
+
+
+# --- Where a hover tip goes (v108.178) ------------------------------------------
+def test_tip_goes_to_an_edge_of_what_it_explains_inside_the_window():
+    from spnav_mapper.tip_place import place_tip
+
+    window, screen = (100, 100, 900, 600), (0, 0, 1920, 1080)
+    size = (200, 40)
+    # A button in the middle: after its right edge, level with its top.
+    assert place_tip((400, 300, 80, 30), size, window, (420, 310), outer=screen) == (486, 300)
+    # At the window's right side there is no room after it: before its left edge.
+    assert place_tip((880, 300, 80, 30), size, window, (900, 310), outer=screen) == (674, 300)
+    # A comment box as wide as the window: below it, from where its text begins.
+    assert place_tip((110, 300, 880, 24), size, window, (500, 310), outer=screen) == (110, 330)
+    # ... and above it at the bottom of the window.
+    assert place_tip((110, 670, 880, 24), size, window, (500, 680), outer=screen) == (110, 624)
+    # Level with the button's top, but never out of the window's bottom.
+    assert place_tip((400, 680, 80, 18), size, window, (420, 690), outer=screen) == (486, 660)
+
+
+def test_tip_is_never_under_the_pointer_or_over_an_open_drop_down():
+    from spnav_mapper.tip_place import _hits, place_tip
+
+    window, screen = (100, 100, 900, 600), (0, 0, 1920, 1080)
+    size = (260, 60)
+    # A drop-down's item (the row is the drop-down's width) with its submenu open to the right:
+    # the tip goes to the left of the drop-down, off both.
+    menu, submenu = (300, 124, 220, 200), (520, 160, 160, 120)
+    x, y = place_tip((300, 160, 220, 24), size, window, (400, 170), avoid=[menu, submenu], outer=screen)
+    assert (x, y) == (34, 160)  # 300 - 6 - 260: still inside the screen, though left of the window
+    assert not _hits(x, y, *size, menu) and not _hits(x, y, *size, submenu)
+    # With no submenu: to the right of the drop-down.
+    assert place_tip((300, 160, 220, 24), size, window, (400, 170), avoid=[menu], outer=screen) == (526, 160)
+    # Something large (an axis panel): beside the pointer, not at the panel's far edge.
+    x, y = place_tip((120, 150, 280, 300), size, window, (200, 380), outer=screen)
+    assert abs(x - 200) < 300 and abs(y - 380) < 80
+    assert not _hits(x, y, *size, (198, 378, 5, 5))
+    # A window too small for the tip: it may leave the window, not the screen.
+    small = (800, 400, 180, 90)
+    x, y = place_tip((820, 420, 60, 20), size, small, (830, 425), outer=screen)
+    assert 0 <= x and x + size[0] <= 1920 and 0 <= y and y + size[1] <= 1080
+    assert not _hits(x, y, *size, (828, 423, 5, 5))
+    # No screen given and no room off the pointer: inside the area all the same.
+    x, y = place_tip((0, 0, 300, 100), size, (0, 0, 300, 100), (150, 50))
+    assert 0 <= x <= 40 and 0 <= y <= 40
+
+
+# --- Copy and paste of a bind (v108.181) ------------------------------------------
+def test_bind_copy_keeps_its_own_copy_of_the_settings_and_the_comment():
+    from spnav_mapper import bind_copy
+
+    bind_copy.clear()
+    assert bind_copy.copied() is None and bind_copy.source() == ""
+    bind = {
+        "direction": "Plus", "combo": ["ctrl", "c"], "mode": "Macro", "min": 37, "max": 66, "dead": 12,
+        "repeat_ms": 140, "tap_ms": 45, "min_hold_ms": 175, "settle_ms": 250,
+        "noback_plus": True, "noback_minus": False,
+        "macro": [["tap", "a"], ["delay", 50]], "macro_repeat": True, "enabled": False,
+        "active": True, "last_tap": 12.5, "last_on_ts": 3.0, "comment": "old",
+    }  # fmt: skip
+    bind_copy.copy_bind(bind, "crouch", "Z Bind #2")
+    bind["combo"].append("x")
+    bind["macro"][0][1] = "b"
+    taken = bind_copy.copied()
+    assert bind_copy.source() == taken["source"] == "Z Bind #2" and taken["comment"] == "crouch"
+    assert set(taken["settings"]) == set(bind_copy.SETTINGS)  # settings only: not its running state
+    assert taken["settings"]["combo"] == ["ctrl", "c"] and taken["settings"]["macro"][0] == ["tap", "a"]
+    taken["settings"]["combo"].clear()  # what is handed out is a copy too
+    assert bind_copy.copied()["settings"]["combo"] == ["ctrl", "c"]
+    # v108.182: what a bind was before a paste, for Undo Paste.
+    owner, other = object(), object()
+    assert bind_copy.before_paste() is None and bind_copy.undo_name() == ""
+    bind_copy.remember_before_paste(owner, 3, bind, "lean left", "X Bind #4")
+    bind["min"] = 99
+    kept = bind_copy.before_paste()
+    assert (kept["owner"], kept["index"], kept["comment"], kept["name"]) == (
+        owner,
+        3,
+        "lean left",
+        "X Bind #4",
+    )
+    assert kept["settings"]["min"] == 37 and bind_copy.undo_name() == "X Bind #4"
+    bind_copy.forget_paste(other)  # another axis: not its paste
+    assert bind_copy.undo_name() == "X Bind #4"
+    bind_copy.forget_paste(owner)
+    assert bind_copy.before_paste() is None
+    bind_copy.remember_before_paste(owner, 3, bind, "", "X Bind #4")
+    bind_copy.clear()
+    assert bind_copy.copied() is None and bind_copy.before_paste() is None
+
+
+# --- v108.187: Min Hold's times, the keys' list, the scroll bar, attached to the editor -------------
+def test_axis_history_keeps_ten_seconds_and_shows_five():
+    from spnav_mapper import axis_history
+
+    assert axis_history.KEEP_S == 10.0 and axis_history.VIEW_S == 5
+    clock = [0.0]
+    history = axis_history.AxisHistory(clock=lambda: clock[0])
+    for i in range(41):  # 20 s
+        clock[0] = i * 0.5
+        history.add_sample(0.1)
+    assert history.samples[0][0] == 10.0 and history.samples[-1][0] == 20.0
+
+
+def test_axis_history_hold_times_and_key_log():
+    # Each key-up carries how long its key was held, each tap its Tap Dwell; key_log()
+    # makes one row of a press and its key-up, with the time since the row before.
+    from spnav_mapper import axis_history as ah
+
+    clock = [0.0]
+    history = ah.AxisHistory(clock=lambda: clock[0])
+
+    def at(t, kind, index, key, value, ms=None):
+        clock[0] = t
+        history.add_event(kind, index, key, value, ms)
+
+    at(1.000, "down", 0, "C", 0.40)
+    at(1.080, "down", 1, "CTRL", 0.62)
+    at(1.256, "up", 1, "CTRL", 0.30, 176.04)
+    at(1.400, "noback-up", 0, "C", 0.20, 400)
+    at(2.000, "unsent-tap", 2, "W", -0.5, 175)
+    at(2.500, "held", 0, "C", 0.35)
+    at(3.000, "up", 3, "G", -0.3)  # a Release-only bind: a key-up with no press before it
+    at(4.000, "down", 1, "CTRL", 0.7)  # still held
+    events = list(history.events)
+    assert events[2] == (1.256, "up", 1, "CTRL", 0.30, 176.0) and ah.event_ms(events[0]) is None
+    assert ah.event_ms((1.0, "down", 0, "C", 0.4)) is None  # an event without the sixth item
+    assert ah.event_label("up", 176.0) == "up · held 176 ms"
+    assert ah.event_label("unsent-tap", 175) == "tap (not sent) · 175 ms"
+    assert ah.event_label("down") == "down" and ah.event_label("held", 5) == "held by NoBack"
+    assert ah.ms_text(4.26) == "4.3 ms" and ah.ms_text(43.2) == "43 ms" and ah.ms_text(None) == ""
+    rows = ah.key_log([("Z", [], events)])
+    assert [(r["key"], ah.key_log_text(r)) for r in rows] == [
+        ("C", "held 400 ms (NoBack let go)"),
+        ("CTRL", "held 176 ms"),
+        ("W", "tap 175 ms (not sent)"),
+        ("C", "held by NoBack"),
+        ("G", "up"),
+        ("CTRL", "down, still held"),
+    ]
+    assert [round(r["gap_ms"]) if r["gap_ms"] is not None else None for r in rows] == [
+        None,
+        80,
+        920,
+        500,
+        500,
+        1000,
+    ]
+    assert rows[1]["value"] == 62.0 and rows[1]["end_value"] == pytest.approx(30.0)
+    assert [r["sent"] for r in rows] == [True, True, False, True, True, True]
+    # Two axes: one list, in time order.
+    both = ah.key_log([("Z", [], events[:2]), ("X", [], [(1.04, "tap", 0, "A", 0.5, 45.0)])])
+    assert [(r["axis"], r["key"]) for r in both] == [("Z", "C"), ("X", "A"), ("Z", "CTRL")]
+    # The CSV's last column, and the dots' labels with the times.
+    csv = ah.csv_rows([("Z", [], events)])
+    assert ("Z", "0.256", "30.0", "up", "Bind #2", "CTRL", "176.0") in csv
+    assert ("Z", "1.000", "-50.0", "tap (not sent)", "Bind #3", "W", "175.0") in csv
+    shapes = ah.drawing([], events[:3], [], 5, 2.0, 5, 900, 300, labelled=True)
+    texts = [s[3] for s in shapes if s[0] == "text"]
+    assert "CTRL up · held 176 ms" in texts and "C down" in texts
+    assert ah.summary([(1.0, 0.4)], events).startswith("Peak +40%, −0% · Bind #1 pressed 1×")
+
+
+def test_axis_history_scrolled_back_and_dots_without_labels():
+    # The window scrolled back: the times under the plot say how far. While the graphs
+    # run the dots have no labels (labelled=False): text that moves cannot be read.
+    from spnav_mapper import axis_history as ah
+
+    events = [(8.0, "down", 0, "A", 0.5, None), (8.2, "up", 0, "A", 0.3, 200.0)]
+    live = ah.drawing([], events, [], 5, 10.0, 5, 900, 300, labelled=False)
+    assert [s[3] for s in live if s[0] == "text"][-3:] == ["−5 s", "−2.5 s", "now"]
+    assert len([s for s in live if s[0] == "circle"]) == 2
+    assert not [s for s in live if s[0] == "text" and s[3].startswith("A ")]
+    back = ah.drawing([], events, [], 5, 6.5, 5, 900, 300, ago=3.5)
+    assert [s[3] for s in back if s[0] == "text"][-3:] == ["−8.5 s", "−6 s", "−3.5 s"]
+    together = ah.drawing_together([("X", [], events)], 10.0, 5, 900, 300, ago=5, labelled=False)
+    assert [s[3] for s in together if s[0] == "text"][-3:] == ["−10 s", "−7.5 s", "−5 s"]
+    assert not [s for s in together if s[0] == "text" and "A " in s[3]]
+    # A dot's label keeps clear of NoBack's labels, and goes a line or two further away
+    # rather than being left out.
+    noback = [(7.9, "+", 40)]
+    clear = ah.drawing(
+        [], events, [(0, "+", 40, "A", "+")], 5, 10.0, 5, 900, 300, noback=noback, labelled=True
+    )
+    boxes = {
+        s[3]: (s[1], s[2] - 13 * 0.8, s[1] + ah.text_width(s[3]), s[2] + 13 * 0.2)
+        for s in clear
+        if s[0] == "text" and (s[3].startswith("A ") or s[3].startswith("NoBack 40"))
+    }
+    assert set(boxes) == {"A down", "A up · held 200 ms", "NoBack 40%"}
+    names = sorted(boxes)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            (ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1) = boxes[a], boxes[b]
+            assert not (ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1), (a, b)
+
+
+def test_axis_history_window_goes_beside_the_editor():
+    # v108.188: attached, the window takes the rest of the monitor beside the editor at full
+    # height; the editor goes to the top left meanwhile, or where it was last put then.
+    from spnav_mapper.axis_history import editor_spot, history_beside, spot_to_remember
+
+    area = (0, 0, 3840, 2120)
+    editor = (960, 100, 1684, 1300)  # its frame's corner and its own size
+    # The top left of the area, the size unchanged; 7 pixels of invisible border past the edge.
+    assert editor_spot(editor, area) == (0, 0, 1684, 1300)
+    assert editor_spot(editor, area, None, bleed=7) == (-7, 0, 1684, 1300)
+    # A second monitor to the right of the first: its own top left.
+    assert editor_spot(editor, (3840, 0, 2560, 1400), None, 7) == (3833, 0, 1684, 1300)
+    # Where it was last put while the window was open, and its size then, if it was resized.
+    assert spot_to_remember((300, 50, 1684, 1300), area, (1684, 1300)) == [300, 50, None, None]
+    assert spot_to_remember((300, 50, 1500, 1200), area, (1684, 1300)) == [300, 50, 1500, 1200]
+    assert spot_to_remember((4140, 50, 1684, 1300), (3840, 0, 2560, 1400), (1684, 1300))[:2] == [300, 50]
+    assert editor_spot(editor, area, [300, 50, None, None], 7) == (300, 50, 1684, 1300)
+    assert editor_spot(editor, area, [300, 50, 1500, 1200], 7) == (300, 50, 1500, 1200)
+    # Kept on the monitor; a size larger than the monitor, or a place that is no place, is not used.
+    assert editor_spot(editor, area, [9000, 9000, None, None]) == (3840 - 120, 2120 - 120, 1684, 1300)
+    assert editor_spot(editor, area, [-500, -500, 9000, 9000], 7) == (-7, 0, 1684, 1300)
+    assert editor_spot(editor, area, ["x"], 7) == (-7, 0, 1684, 1300)
+    # The window: from the editor's right edge to the area's right edge, the area's full height.
+    frame = (-7, 0, 1700, 1339)  # the editor's frame at the top left
+    assert history_beside(frame, area, 640) == (1693, 0, 2147, 2120)
+    # The frames' invisible borders laid over each other (14), and past the screen's edges (7).
+    assert history_beside(frame, area, 640, overlap=14, bleed=(7, 7)) == (1679, 0, 2168, 2127)
+    # Whatever the editor's own top and height: the area's.
+    assert history_beside((300, 400, 1700, 900), area, 640) == (2000, 0, 1840, 2120)
+    # Less than the least width beside the editor: the window keeps it and covers the editor's right.
+    assert history_beside((1500, 0, 1700, 1339), (0, 0, 2560, 1400), 640) == (1920, 0, 640, 1400)
+    assert history_beside((4140, 50, 1700, 900), (3840, 0, 2560, 1400), 640) == (5760, 0, 640, 1400)
+
+
+def test_profile_note_is_kept_with_the_profile(tmp_path):
+    from spnav_mapper import profile_note as pn
+
+    assert pn.clean_note("  one\r\ntwo\rthree  ") == "one\ntwo\nthree"
+    assert pn.clean_note(None) == "" and len(pn.clean_note("x" * 5000)) == pn.NOTE_MAX_CHARS
+    assert pn.note_from_config({}) == ("", False) and pn.note_from_config("junk") == ("", False)
+    assert pn.note_from_config({"note": {"text": " Run as admin ", "important": 1}}) == ("Run as admin", True)
+    assert pn.note_from_config({"note": {"text": "", "important": True}}) == ("", False)  # nothing to read
+    assert pn.note_from_config({"note": "by hand"}) == ("by hand", False)
+    # Written only when there is text: a profile without a note is as before.
+    assert pn.put_note({"axes": {}}, "", True) == {"axes": {}}
+    assert pn.put_note({"axes": {}, "note": {"text": "old"}}, "  ", False) == {"axes": {}}
+    assert pn.put_note({}, "Set Prone to Hold", True) == {
+        "note": {"text": "Set Prone to Hold", "important": True}
+    }
+    # What the profile name shows: it flashes until the note has been opened, then stays red.
+    assert pn.name_state("text", True, False) == pn.UNREAD and pn.name_state("text", True, True) == pn.READ
+    assert pn.name_state("text", False, False) == pn.PLAIN and pn.name_state("", True, False) == pn.PLAIN
+    assert [pn.flash_colour(pn.UNREAD, phase) for phase in (True, False)] == [pn.RED, pn.WHITE]
+    assert pn.flash_colour(pn.READ, False) == pn.RED and pn.flash_colour(pn.PLAIN, True) is None
+    assert pn.FLASH_MS == 500  # one flash a second
+    assert pn.tray_line("text", True, False).startswith("\n⚠") and pn.tray_line("text", True, True) == ""
+    assert pn.name_tip("", False, True).startswith("Click: choose the target program's window.")
+    assert pn.name_tip("Set Prone to Hold", True, False).splitlines()[0].startswith("⚠ Important note")
+    assert pn.name_tip("x" * 700, False, True).endswith("…")
+    # v108.189: that a note has been opened is remembered on this PC by what the note says:
+    # the same text however its line ends are written, another mark for another text.
+    mark = pn.note_mark("Run as admin\r\nSet Prone to Hold  ")
+    assert mark == pn.note_mark("Run as admin\nSet Prone to Hold") and len(mark) == 16
+    assert mark != pn.note_mark("Run as admin\nSet Prone to Tick")
+    assert not pn.note_read(None, "Run as admin") and not pn.note_read({"junk": 1}, "Run as admin")
+    assert pn.note_read(None, "") and pn.note_read([], "  ")  # no text: nothing to read
+    read = pn.with_note_read(None, "Run as admin")
+    assert read == [pn.note_mark("Run as admin")] and pn.note_read(read, " Run as admin\n")
+    assert not pn.note_read(read, "Run as admin!")  # the text changed: unread again
+    assert pn.with_note_read(read, "") == read and pn.with_note_read(read, "Run as admin") == read
+    # The newest is last, each once; beyond `keep` the oldest are dropped. Junk in the file is dropped.
+    more = pn.with_note_read(pn.with_note_read(read, "two"), "Run as admin")
+    assert more == [pn.note_mark("two"), pn.note_mark("Run as admin")]
+    assert pn.with_note_read(more, "three", keep=2) == [pn.note_mark("Run as admin"), pn.note_mark("three")]
+    assert pn.clean_read(["a", "a", 3, "", None, "b"]) == ["a", "b"] and pn.clean_read("a") == []
+    # Save Note writes the note, and only the note, into the file; the old file goes to the backups.
+    import json
+
+    path = tmp_path / "game.json"
+    path.write_text(json.dumps({"axes": {"X": 1}, "hys_pct": 3}), encoding="utf-8")
+    pn.write_note_to_profile(str(path), "Run as admin", True, str(tmp_path / "backups"))
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "axes": {"X": 1},
+        "hys_pct": 3,
+        "note": {"text": "Run as admin", "important": True},
+    }
+    assert len(list((tmp_path / "backups").iterdir())) == 1
+    pn.write_note_to_profile(str(path), "", False, str(tmp_path / "backups"))
+    assert json.loads(path.read_text(encoding="utf-8")) == {"axes": {"X": 1}, "hys_pct": 3}
+    path.write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(ValueError):
+        pn.write_note_to_profile(str(path), "x", False, str(tmp_path / "backups"))
+
+
+def test_axis_history_report_has_the_chart_and_every_setting():
+    # Export's chart report: the graph as SVG, the axis's binds with all their settings
+    # (the ones that fired marked) and the keys in time order with how long each was held.
+    from spnav_mapper import axis_history as ah
+    from spnav_mapper import axis_history_report as report
+
+    binds = [
+        {"direction": "Plus", "combo": ["c"], "mode": "Hold", "min": 0, "max": 54, "dead": 32,
+         "noback_plus": True, "comment": "Crouch <1>"},
+        {"direction": "Plus", "combo": ["ctrl"], "mode": "Hold", "min": 59, "max": 100, "dead": 0,
+         "min_hold_ms": 175, "comment": "Prone"},
+        {"direction": "Minus", "combo": ["w"], "mode": "Tick", "min": 12, "tap_ms": 80, "settle_ms": 150},
+        {"direction": "Full", "combo": ["r"], "mode": "Press/Repeat", "min": 70, "max": 100, "dead": 5,
+         "repeat_ms": 120, "enabled": False},
+        {"direction": None, "combo": None, "mode": "Hold", "min": 0, "max": 100},
+    ]  # fmt: skip
+    key_text = lambda bind: "+".join(bind["combo"]).upper() if bind.get("combo") else ""
+    events = [
+        (1.0, "down", 1, "CTRL", 0.62, None),
+        (1.176, "up", 1, "CTRL", 0.2, 176.0),
+        (2.0, "unsent-tap", 2, "W", -0.2, 80.0),
+    ]
+    samples = [(t / 10, 0.62 if 10 <= t <= 11 else 0.0) for t in range(0, 101)]
+    table = report.bind_table(binds, 5, key_text, 45, report.fired_counts(events))
+    assert [row["bind"] for row in table] == ["Bind #1", "Bind #2", "Bind #3", "Bind #4"]  # #5 is not set up
+    crouch, prone, walk, repeat = table
+    assert (crouch["start"], crouch["dead"], crouch["hold"], crouch["noback"]) == (
+        "32%",
+        "32%",
+        "0 (off)",
+        "NoBack −",
+    )
+    assert (prone["start"], prone["hold"], prone["fired"], prone["tap"]) == (
+        "59%",
+        "175 ms",
+        "pressed 1×",
+        "",
+    )
+    assert (walk["start"], walk["min"], walk["tap"], walk["rebound"]) == (
+        "−12%",
+        "Tick 12%",
+        "80 ms",
+        "150 ms",
+    )
+    assert walk["fired"] == "tapped 1× (not sent)" and walk["max"] == walk["dead"] == walk["hold"] == ""
+    assert (repeat["start"], repeat["repeat"], repeat["on"]) == ("±75%", "120 ms", "switched off")
+    # A column no bind of the axis uses is left out.
+    assert [c[0] for c in report.bind_columns(table[:2])][-4:] == ["hold", "noback", "fired", "comment"]
+    assert "repeat" in [c[0] for c in report.bind_columns(table)]
+    shapes = ah.drawing(samples, events, ah.bind_bands(binds, 5, key_text), 5, 10.0, 10, 1200, 380)
+    picture = report.svg(shapes, 1200, 380)
+    assert picture.startswith("<svg ") and picture.endswith("</svg>") and 'viewBox="0 0 1200 380"' in picture
+    assert picture.count("<circle") == 3 + 5  # the three keys, and a swatch for each of the five label rows
+    assert (
+        "<polyline" in picture and "CTRL up · held 176 ms" in picture and "rgba(148,163,184,0.18)" in picture
+    )
+    page = report.report_html(
+        {
+            "version": "v108.187",
+            "saved": "2026-11-21 12:00:00",
+            "profile": "MW4 & co",
+            "target": "game.exe",
+            "mode": "Manual On",
+            "note": "Set <Prone> to Hold",
+            "important": True,
+            "csv": "capture.csv",
+            "not_shown": "X",
+        },
+        [{"axis": "Z", "samples": samples, "events": events, "binds": binds, "dead": 5, "noback": [],
+          "now": 10.0, "key_text": key_text}],
+    )  # fmt: skip
+    assert page.startswith("<!DOCTYPE html>") and page.count("<svg") == 1 and "<script" not in page
+    assert "http" not in page.replace("http://www.w3.org/2000/svg", "")  # nothing to fetch
+    assert "MW4 &amp; co" in page and "Set &lt;Prone&gt; to Hold" in page and "Important profile note" in page
+    assert "Crouch &lt;1&gt;" in page and "<h2>Z axis</h2>" in page and "the last 10 seconds" in page
+    assert "held 176 ms" in page and "tap 80 ms (not sent)" in page and "Binds also fired on X" in page
+    rows = report.key_rows([("Z", samples, events)])
+    assert [(r["time"], r["gap"], r["what"], r["ms"]) for r in rows] == [
+        ("1.000", "", "held 176 ms", "176"),
+        ("2.000", "1000 ms", "tap 80 ms (not sent)", "80"),
+    ]
+    empty = report.report_html({}, [{"axis": "X", "samples": [], "events": [], "binds": [], "dead": 5,
+                                     "now": 0.0, "key_text": key_text}])  # fmt: skip
+    assert "No bind is set up on this axis." in empty and "No bind did anything in this capture." in empty

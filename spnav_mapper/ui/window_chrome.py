@@ -32,10 +32,12 @@ from ..display_preferences import (
     update_preference,
 )
 from ..paths import APP_DIR, CONFIG_DIR, LAST_CONFIG_FILE, RESOURCE_DIR
+from ..profile_note import tray_line
 from ..settings import ensure_dir
 from ..single_instance import exit_message_id, is_exit_message, is_restore_message, restore_message_id
-from .axis_history_window import add_axis_history_option
+from .axis_history_window import add_axis_history_option, undock_for_close
 from .editor_fit import prepare_full_scroll
+from .menu_autoclose import closes_menu
 from .placement import (
     connected_screen,
     positions_monitor,
@@ -96,7 +98,14 @@ def refresh_title(win):
     # Windows displays this window title in the taskbar hover preview.
     caption = "SpaceNavigator Mapper — " + name
     # Windows tray tooltip limit is 127 UTF-16 chars on some versions.
-    tray_tip = ("SpaceNavigator Mapper\nLoaded: " + name)[:125]
+    # v108.187: a line for an important profile note not opened yet (the
+    # profile name's flash cannot be seen while the Mapper is in the tray).
+    warning = tray_line(
+        getattr(win, "profile_note", ""),
+        getattr(win, "profile_note_important", False),
+        getattr(win, "_note_seen", True),
+    )
+    tray_tip = ("SpaceNavigator Mapper\nLoaded: " + name)[: 125 - len(warning)] + warning
     if win.windowTitle() != caption:
         win.setWindowTitle(caption)
     tray = getattr(win, "_tray", None)
@@ -396,6 +405,9 @@ def _add_display_menu(win):
     view.setTitle("Options")
     view.addAction(win.led_chk)
     add_axis_history_option(win, view)  # v108.149
+    from .profile_note_dialog import add_profile_note_option
+
+    add_profile_note_option(win, view)  # v108.187
     backup_menu = view.addMenu("Load Backup")
     # v108.174: Restart as Administrator (or Running as Administrator).
     from .elevation import install_elevation_guard
@@ -442,6 +454,7 @@ def _add_display_menu(win):
         choice.setCheckable(True)
         choice.setChecked(abs(current - factor) < 0.001)
         choice.setToolTip("Scale interface and fonts together; restarts automatically.")
+        closes_menu(choice)  # v108.178: the editor restarts
         group.addAction(choice)
         display_menu.addAction(choice)
 
@@ -462,7 +475,7 @@ def _add_display_menu(win):
 
         choice.triggered.connect(choose)
 
-    display_menu.addSeparator()
+    # v108.178: no separator line (it showed as a blank line) before Positions Saved.
     positions = display_menu.addMenu("Positions Saved")
     positions.setToolTipsVisible(True)
     positions.aboutToShow.connect(lambda w=win, m=positions: _fill_positions_menu(w, m))
@@ -506,12 +519,14 @@ def _fill_positions_menu(win, menu):
             "there, at start-up too. Unchecked: it opens centred."
         )
         action.toggled.connect(lambda on, w=win, s=screen: _choose_positions_monitor(w, s if on else None))
+        closes_menu(action)  # v108.178: the editor may move to that monitor
         menu.addAction(action)
     if chosen and chosen_screen is None:
         missing = QAction(f"{chosen['screen_name']} (not connected; the primary monitor is used)", menu)
         missing.setCheckable(True)
         missing.setChecked(True)
         missing.toggled.connect(lambda on, w=win: on or _choose_positions_monitor(w, None))
+        closes_menu(missing)
         menu.addAction(missing)
 
 
@@ -604,6 +619,20 @@ def grow_menu_fonts(menus, points):
         menu.setFont(font)
 
 
+def dropdown_font(win):
+    """The font of the menu bar's drop-downs (Auto-Profiles, Options, Display); None without them.
+
+    v108.178: a Bind button's right-click menu and the hover tips use it too.
+    """
+    try:
+        for action in win.menuBar().actions():
+            if action.menu() is not None:
+                return QFont(action.menu().font())
+    except (AttributeError, RuntimeError, TypeError):
+        pass
+    return None
+
+
 def enlarge_menu_fonts(win, points=1.0):
     """Make the menu-bar menus (Auto-Profiles, Options, Display) and their submenus `points` larger."""
     grow_menu_fonts([action.menu() for action in win.menuBar().actions()], points)
@@ -662,6 +691,11 @@ class WindowChromeMixin:
         from .menu_tips import install_menu_tips
 
         install_menu_tips(self)
+        # v108.178: every hover tip in the Mapper's own tip window (white on
+        # black, the drop-downs' font, beside what it explains).
+        from .tips import install_tips
+
+        install_tips(self)
 
     def changeEvent(self, event):
         """v108.151: a maximize from the keyboard (Win+Up) or snapping is undone."""
@@ -671,6 +705,9 @@ class WindowChromeMixin:
 
     def closeEvent(self, event):
         """X: hide to the tray, or shut down."""
+        # v108.187: where the editor was before the attached Axis History
+        # window moved it left is the position to save.
+        undock_for_close(self)
         if self._close_to_tray and not self._force_exit:
             # Remember the position, then hide. Do not run _shutdown_on_close:
             # it releases the HID device and writes last_config.json.

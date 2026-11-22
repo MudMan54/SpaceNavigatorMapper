@@ -68,6 +68,7 @@ def panel(binds, plus=True, minus=True, dead=5, ignore_max=True):
             "repeat_ms": 60,
             "last_on_ts": 0.0,
             "dead": dead,
+            "settle_ms": 0,  # the cases above "v108.177" run without Settle, as before it
         }
         full.update(b)
         full["noback_plus"], full["noback_minus"] = axis_panel.bind_noback_from(
@@ -217,6 +218,107 @@ CASES = {
     ),
 }
 
+# v108.177: Settle. A sample is 16 ms. The puck let go from 80%: it falls
+# through the centre, swings to the other side and bounces back out to 42%.
+SETTLE = lambda bind, ms=150: dict(bind, settle_ms=ms)
+BOUNCE = [80, 40, 0, -15, 0, 20, 42, 30, 10, 0]  # back above 37% 64 ms after falling below it
+REST = [0] * 12  # 192 ms at the centre
+CROUCH_PRONE = lambda ms: [SETTLE(NB(HOLD("c", 37, 100)), ms), HOLD("ctrl", 68, 100)]
+TICKS = lambda ms: [SETTLE(TICK("c", 37), ms), TICK("ctrl", 68)]
+CASES.update(
+    {
+        "bounce, hold with noback, settle off": (CROUCH_PRONE(0), on(sweep(0, 80) + BOUNCE + REST), OFF),
+        "bounce, hold with noback, settle on": (CROUCH_PRONE(150), on(sweep(0, 80) + BOUNCE + REST), OFF),
+        "bounce, ticks, settle off": (TICKS(0), on(sweep(0, 80) + BOUNCE + REST), OFF),
+        "bounce, ticks, settle on": (TICKS(150), on(sweep(0, 80) + BOUNCE + REST), OFF),
+        # A hand comes back after the axis has rested: the lower bind works again.
+        "settle: a push after resting": (
+            TICKS(150),
+            on(sweep(0, 80) + BOUNCE + REST + sweep(0, 45, 0)),
+            OFF,
+        ),
+        # The rest must be unbroken: a push 64 ms after the bounce is still the spring's.
+        "settle: a push too soon after the bounce": (
+            TICKS(150),
+            on(sweep(0, 80) + BOUNCE + [0, 0, 20, 45, 20, 0] + REST + sweep(0, 45, 0)),
+            OFF,
+        ),
+        # The way out is never held: one fast push through both bands.
+        "settle: fast push through both": (TICKS(150), on([10, 80, 80, 0] + REST + [10, 80, 0]), OFF),
+        # Nothing above the bind: Settle never holds it.
+        "settle: a bind with nothing above it": (
+            [SETTLE(TICK("c", 37))],
+            on(sweep(0, 80) + BOUNCE + REST),
+            OFF,
+        ),
+        # A higher band that was not reached arms nothing.
+        "settle: higher band not reached": (
+            TICKS(150),
+            on(sweep(0, 50) + [20, 0, -15, 0, 20, 42, 30, 0]),
+            OFF,
+        ),
+        # Without NoBack (and not a Tick) Settle does not apply.
+        "settle: not for a bind without noback": (
+            [SETTLE(HOLD("c", 37, 100)), HOLD("ctrl", 68, 100)],
+            on([20, 50, 80, 20, 0, -15, 0, 20, 42, 30, 10, 0]),
+            OFF,
+        ),
+        # The other side has its own guard: the minus side is not held by the plus side.
+        "settle: the other side is not held": (
+            [SETTLE(TICK("c", 37, "Full")), TICK("ctrl", 68)],
+            on(sweep(0, 80) + [80, 40, 0, -20, -42, -20, 0] + REST),
+            OFF,
+        ),
+        # Press/Release with NoBack: quiet through the bounce, like Hold.
+        "settle: press/release with noback": (
+            [SETTLE(NB(PR("c", 37, 60))), PR("ctrl", 68, 100)],
+            on(sweep(0, 80) + BOUNCE + REST + sweep(0, 45, 0)),
+            OFF,
+        ),
+        # Output off during the bounce: the guard follows the stroke all the same.
+        "settle: follows the stroke with output off": (
+            TICKS(150),
+            on(sweep(0, 80)) + [(x, False) for x in BOUNCE[:5]] + on(BOUNCE[5:] + REST),
+            OFF,
+        ),
+    }
+)
+
+# v108.183: a bind switched off on its menu takes no part.
+SWITCHED_OFF = lambda bind: dict(bind, enabled=False)
+CASES.update(
+    {
+        "switched off: a hold sends nothing": (
+            [SWITCHED_OFF(HOLD("c", 37, 100)), HOLD("ctrl", 68, 100)],
+            on(sweep(0, 80, 0) + [0]),
+            OFF,
+        ),
+        "switched off: a tick sends nothing": (
+            [SWITCHED_OFF(TICK("c", 37)), TICK("ctrl", 68)],
+            on(sweep(0, 80, 0) + [0]),
+            OFF,
+        ),
+        # The higher bind is on: NoBack lets the lower one go on the way back from it.
+        "higher bind on: noback sees it": (
+            [NB(HOLD("c", 37, 100)), HOLD("ctrl", 68, 100)],
+            on(sweep(0, 80, 50) + [50, 50]),
+            OFF,
+        ),
+        # The higher bind is switched off: for the lower one it is not there.
+        "higher bind switched off: no band for noback": (
+            [NB(HOLD("c", 37, 100)), SWITCHED_OFF(HOLD("ctrl", 68, 100))],
+            on(sweep(0, 80, 50) + [50, 50]),
+            OFF,
+        ),
+        # ... nor for Rebound: the bounce after it taps the lower Tick, as with nothing above it.
+        "higher bind switched off: no band for rebound": (
+            [SETTLE(TICK("c", 37)), SWITCHED_OFF(TICK("ctrl", 68))],
+            on(sweep(0, 80) + BOUNCE + REST),
+            OFF,
+        ),
+    }
+)
+
 RESULTS = {name: run(b, s, **o) for name, (b, s, o) in CASES.items()}
 
 # v108.166: each tap holds its key for its bind's Tap Dwell (the profile's when
@@ -232,5 +334,82 @@ RESULTS["tap dwell keys"] = run(
     **OFF,
 )
 RESULTS["tap dwell ms"] = [event[2] for event in EVENTS if event[1] == "tap"]
+
+
+def history_marks(binds, samples):
+    """What Axis History records for a stroke: (kind, bind number) of each event."""
+    from spnav_mapper import axis_history
+
+    EVENTS.clear()
+    p = panel(binds, **OFF)
+    p.history = axis_history.AxisHistory()
+    for pct, allow in samples:
+        env.advance(16)
+        p.update_val(pct / 100.0, allow)
+    return [[event[1], event[2] + 1] for event in p.history.events]
+
+
+# v108.177: Axis History marks where Settle kept a bind quiet ("held by Settle").
+RESULTS["settle marks, ticks"] = history_marks(TICKS(150), on(sweep(0, 80) + BOUNCE + REST))
+RESULTS["settle marks, hold with noback"] = history_marks(CROUCH_PRONE(150), on(sweep(0, 80) + BOUNCE + REST))
+
+
+# v108.187: Min Hold, per bind: a Hold bind's key stays down at least that long.
+def hold_times(binds, samples, history=False):
+    """[key, how long it was down in ms] for each press of a stroke (16 ms a sample).
+
+    With `history`, what Axis History records instead: [kind, bind number, ms].
+    """
+    from spnav_mapper import axis_history
+
+    down, held = {}, []
+
+    def send(combo, is_down, status_callback=None):
+        key = "+".join(combo).upper()
+        if is_down:
+            down[key] = fakeqt.CLOCK.ms
+        else:
+            held.append([key, round(fakeqt.CLOCK.ms - down.pop(key))])
+
+    saved, axis_panel.send_combo = axis_panel.send_combo, send
+    try:
+        p = panel(binds, **OFF)
+        if history:
+            p.history = axis_history.AxisHistory()
+        for pct, allow in samples:
+            env.advance(16)
+            p.update_val(pct / 100.0, allow)
+    finally:
+        axis_panel.send_combo = saved
+    if history:
+        return [[event[1], event[2] + 1, event[5]] for event in p.history.events]
+    return held + [[key, "still down"] for key in down]
+
+
+MIN_HOLD = lambda bind, ms: dict(bind, min_hold_ms=ms)
+PRONE = HOLD("ctrl", 59, 100)  # starts at 64% with the 5% dead zone
+FLICK = [0, 70, 30, 0] + [0] * 14  # in the band for one sample only
+RESULTS["min hold: none, a flick lets go at once"] = hold_times([PRONE], on(FLICK))
+RESULTS["min hold: 175 ms, a flick"] = hold_times([MIN_HOLD(PRONE, 175)], on(FLICK))
+RESULTS["min hold: 175 ms, held longer"] = hold_times(
+    [MIN_HOLD(PRONE, 175)], on([0] + [70] * 20 + [30, 0, 0])
+)
+RESULTS["min hold: back in the band meanwhile"] = hold_times(
+    [MIN_HOLD(PRONE, 175)], on([0, 70, 30, 30, 70, 70, 30] + [0] * 14)
+)
+RESULTS["min hold: output goes off"] = hold_times(
+    [MIN_HOLD(PRONE, 175)], [(0, True), (70, True), (70, True), (70, False), (70, False), (0, True)]
+)
+# NoBack lets the lower bind go on the way back from the higher one, but not before its Min Hold.
+CROUCH = NB(HOLD("c", 32, 100))
+QUICK = [0, 45, 80, 80, 50, 50] + [0] * 14
+RESULTS["min hold: noback lets go at once without it"] = hold_times([CROUCH, PRONE], on(QUICK))
+RESULTS["min hold: noback waits for it"] = hold_times([MIN_HOLD(CROUCH, 175), PRONE], on(QUICK))
+# Axis History: each key-up with how long the key was held, each tap with its Tap Dwell.
+RESULTS["min hold: history"] = hold_times(
+    [MIN_HOLD(PRONE, 175), dict(TICK("t", 20), tap_ms=80)], on(FLICK), history=True
+)
+# 600 ms asked for: at most 500.
+RESULTS["min hold: at most 500 ms"] = hold_times([MIN_HOLD(PRONE, 600)], on([0, 70, 0] + [0] * 40))
 
 print(json.dumps(RESULTS))

@@ -5,6 +5,355 @@ with every update since. The user's README is the PDF reference manual,
 `spnav_mapper/resources/SpaceNavigator_Mapper_README.pdf`: right-click the
 "SpaceNavigator Mapper" title in the app to open it.
 
+## v108.189 — An opened note stays read; Axis History asks Windows for the monitor
+
+- **A note that has been opened is remembered on this PC.** The profile name
+  of an important note flashes until the note has been opened once, and
+  from then on stays red: at the next load and at the next start of the
+  Mapper too. Before, it flashed again at every load of the profile, so at
+  every start. What is remembered is what the note says
+  (`profile_notes_read` in `ui_preferences.json`: a short mark of the text,
+  `note_mark()`), not its file, so the profile can be renamed or saved
+  under another name. The name flashes again when the note's text changes,
+  and on a PC where it has not been opened. Writing or changing a note in
+  its window counts as having read it.
+- **Axis History asks Windows which monitor the editor is on**
+  (`placement.window_screen()`), as the editor's own placement has since
+  v108.163. With two monitors at different scale factors Qt can name the
+  wrong one; opening the window attached then moved the editor to the top
+  left of the other monitor.
+- **Axis History that was open at the last exit opens again only once the
+  editor is in its place** (`reopen_axis_history()`). At start-up the
+  Mapper checks for 750 ms that Windows has the editor on its monitor and
+  moves it back when not; the window opened at 600 ms and moved the editor
+  aside in the middle of that.
+- **Button 1 freezes and resumes Axis History, press after press**: pause,
+  resume, pause, resume. As in v108.188; a test now goes through two rounds.
+  Nothing is exported by the press: Export CSV/HTML stays a button.
+- **`startup.log` says where the editor's position was saved** at exit or on
+  hiding to the tray (monitor, position, size, the monitor checked in
+  Positions Saved), next to the line that says where the next start
+  restored it, and when Axis History moved the editor aside and back.
+- **Not found: the editor starting on the primary monitor with the second
+  one checked in Positions Saved** (reported on v108.188 with Axis History
+  closed at the exit). The code that saves and restores the editor's
+  position is the same as in v108.186, and the simulated two-monitor
+  sessions restore it on the checked monitor. The two Axis History changes
+  above remove the ways found by which v108.187 and v108.188 could move
+  the editor to another monitor. If it happens again, the last lines of
+  `startup.log` (`%LOCALAPPDATA%\SpaceNavigatorMapper`) show what was saved
+  and what was restored.
+- Untested on Windows, like v108.178 to v108.188.
+
+## v108.188 — Axis History takes the screen beside the editor; Button 1 freezes it
+
+- **Opening Axis History moves the editor aside** (Attach to editor ticked):
+  to the top left of its monitor, its size unchanged, not stretched. The
+  window takes the rest of that monitor: from the editor's right edge to the
+  screen's right edge, over the full height of the work area
+  (`history_beside()`, `editor_spot()`). In v108.187 the window was as tall
+  as the editor and the editor moved only when there was no room.
+- **Closing it puts the editor back** where, and as large as, it was before
+  the window opened, always (v108.187 did not when the editor had been
+  moved meanwhile). So do unticking Attach to editor and exiting with the
+  window open: the position saved for the editor is its own.
+- **The editor's place while the window is open is a setting of its own.**
+  Move or resize the editor then and the window stays beside it; that place
+  (and the size, if changed) is remembered per monitor
+  (`axis_history_view.editor_spots` in `ui_preferences.json`) and used the
+  next time the window opens. It never touches the editor's usual position
+  (Positions Saved).
+- **The window no longer drags the editor along.** Dragging the Axis History
+  window by its title bar moves that window only; moving the editor brings
+  it back beside the editor.
+- **Button 1 on the SpaceNavigator freezes the graphs** while the window is
+  open (`freeze_button_pressed()`): a press freezes, as Pause does, the next
+  press resumes. From inside the game, without leaving it. Always Button 1,
+  whatever it is bound to; while the window is open its own key is not
+  sent, and with the window closed it is its bind's again. Button 2 is not
+  affected.
+- **Export CSV/HTML** is the Export button's name (it was Export…).
+- **The Profile Note window's text**, the note's included, is in the font of
+  the Auto-Profiles drop-down: the app's text 2 points larger
+  (`note_font()`).
+- Untested on Windows, like v108.178 to v108.187.
+
+## v108.187 — Min Hold; a profile's note; Axis History beside the editor, with a chart export
+
+- **Why a game could miss a Hold bind's key although it was sent.** A Hold
+  bind holds its key while the axis is in its band, and a quick flick can be
+  in a band for one 16 ms sample. The profile's 60 ms guard for that was
+  passed by whenever the axis was more than 6% below the bind's Min%, so a
+  bind with a high Min% (a prone bind at 59%) let its key go on the very next
+  sample: key down, key up 16 ms later. The key was sent each time, as the
+  history showed; some games do not act on a key held that briefly. (A Tick
+  with a 175 ms Tap Dwell worked because its key is down 175 ms whatever the
+  axis does.)
+- **Min Hold**, per bind (`AxisPanel._hold_kept()`): the shortest time a Hold
+  bind keeps its key down, 0 to 500 ms in steps of 5. The key still goes
+  down at once; when the axis leaves the band sooner, the key-up waits until
+  the key has been down that long. Coming back into the band meanwhile keeps
+  the key down (one press). NoBack letting a lower bind go waits for it too.
+  Output going off, switching the bind off or exiting lets go at once.
+- **In Quick Bind it is the Tap Dwell line.** A Hold bind sends no taps, so
+  in Hold mode that line and its − / + read and set **Min Hold**; in the
+  tapping modes it is Tap Dwell as before (greyed out only in Release-only).
+  No control was added and the editor's size is unchanged. Each bind keeps
+  both values. A Bind button's tip names its Min Hold; Copy and Paste carry
+  it; Reset axis clears it.
+- **Saved with the profile, per bind** (`"min_hold_ms": 175` in the bind,
+  left out at 0). A profile from before has none: every Hold bind works as
+  it did. Tap Dwell was already saved per bind (since v108.166); a Tap Dwell
+  that is not the profile's is now kept for a bind in another mode too, so
+  trying Hold does not lose it. The profile's own `min_hold_ms` (60) is
+  still the guard of a bind without a Min Hold.
+- **A profile's note** (`profile_note.py`, `ui/profile_note_dialog.py`):
+  Options > Profile Note…, or a right-click on the profile name. Text, an
+  **Important** check box, Save Note. Save Note writes the note, and only
+  the note, into the profile's file at once (`"note": {"text": …,
+  "important": true}`, left out without text). For what the profile cannot
+  hold: the game's own settings, Run as Administrator.
+- **An important note flashes the profile name** red and white, once a
+  second, when the profile is loaded, until the note has been opened once (a
+  click on the flashing name opens it); after that the name stays red.
+  Save/Reload, or Auto Load coming back to the same profile, does not start
+  the flash again. The name's tip shows the note; the tray icon's tip says
+  when an important note has not been opened.
+- **Axis History keeps 10 seconds and shows 5** (it kept 30 and showed 5, 10
+  or 30). A scroll bar under the graphs goes back over the rest; the times
+  under each graph say what is in view. *Show the last* is gone.
+- **Text that stands still.** While the graphs run, the dots have no labels:
+  a label that crosses the window in five seconds cannot be read. The keys
+  are listed under the graphs instead, the newest on top, in rows that change
+  only when a key arrives: axis, bind, key, *held 176 ms* or *tap 45 ms*, the
+  axis's value at the press and the key-up, and the time since the key
+  before. Pause puts the labels back on the dots, now with the times
+  (*CTRL up · held 176 ms*).
+- **How long each key was down** is recorded with it: a key-up carries the
+  time its key was held, a tap its Tap Dwell (`AxisHistory.add_event(…, ms)`).
+- **Attach to editor** (ticked at first): the window is joined to the
+  editor's right side, as tall as the editor and reaching the screen's right
+  edge, and moves with it; dragged by its title bar, the editor comes along.
+  With too little room beside the editor, the editor moves left first and
+  goes back when the window closes; the editor's saved position is its own.
+  Unticked: a window of its own, as before.
+- **Export…** (it was Save as CSV…) saves the whole 10 seconds of the axes
+  shown: the CSV, with a new last column `held_ms`, and beside it a chart
+  report (`.html`, `axis_history_report.py`): each axis's graph, every
+  setting of its binds with the ones that fired highlighted, and the keys in
+  time order with how long each was down. One file, nothing to fetch.
+- **Legend** shows or hides the explanation under the graphs (hidden at
+  first); the controls are in three short rows, so the window can be narrow.
+- A dot's label keeps clear of NoBack's labels and goes a line or two
+  further from its dot before it is left out.
+- Untested on Windows, like v108.178 to v108.186.
+
+## v108.186 — A paused Axis History no longer drains away
+
+- **Pause held the clock but not the picture.** The paused view still read
+  the live history, whose rolling 30-second window kept trimming underneath,
+  so after about 20 seconds the paused graphs slowly erased from left to
+  right — too fast to analyse a stroke.
+- **Pause now freezes a copy** of every axis's history at that moment. The
+  graphs, the summary lines and *Save as CSV* all read the frozen copy, so
+  the view holds for as long as needed while recording goes on underneath;
+  *Resume* returns to live, and *Clear* still resumes first.
+- Untested on Windows, like v108.178 to v108.185.
+
+## v108.185 — A reset bind's button flickered; Reset keeps no old DZone
+
+- **A Bind button flickered rapidly once a key was picked for it after
+  Reset.** Two faults met. *Reset* put the axis's dead zone back to 5% but
+  left each bind the DZone it had: a bind set to DZone 0% stayed at 0% and,
+  reset to Full with Min 0%, counted as reached with the puck at rest. And a
+  Bind button whose band is reached while no keys are being sent was greyed
+  on every tick and restored by a timer 120 ms later, so it flickered some
+  sixty times a second for as long as the band was held: with the Target
+  off since long ago, and since v108.184 in Manual On too, where it showed
+  at once.
+- **Reset gives each bind its DZone back** (5%), with the rest of its
+  settings. A bind just reset is no longer reached at rest. (With a key and
+  the target program in front, such a bind in Hold would have held its key
+  all the time.)
+- **The Bind button blinks in step with the border** (`_update_band_blink()`):
+  grey on the border's beat while its band is reached and no keys are being
+  sent, its own style again at once when the band is left or the keys are
+  being sent. No flicker, in any mode.
+- A bind you set yourself to Full, Min 0% and DZone 0% is still reached at
+  rest: that is what those settings say. Its button does not blink while the
+  puck rests (the border is not blinking then).
+- Untested on Windows, like v108.178 to v108.184.
+
+## v108.184 — The border blinks in Manual On; green for the axis moved most
+
+- **The axis borders did not blink in Manual On.** The blink was tied to the
+  Target being off, and in Manual On the Target is always on. It now follows
+  whether keys are being sent on that tick (`AxisPanel._sending`): the
+  border blinks while the axis moves with the Target off, and with it on
+  while the Mapper itself is in front (it never types into itself). So it
+  blinks in Manual On as in Auto Load and Off while you work in the editor,
+  and still not while the target program is in front. A Bind button's grey
+  flash when its band is reached follows the same rule.
+- **Green for the axis moved the most** (`MainWindow._axis_moved_most()`):
+  of the axes beyond their dead zones, the one farthest from its centre
+  blinks green; the others blink blue as before. The puck rarely moves one
+  axis alone, and this shows which axis a push really is.
+- **A Bind button's tip starts with the axis and the direction**: *Z axis,
+  Bind #2: POS (+)*, kept up to date with the Bind Dir.
+- Untested on Windows, like v108.178 to v108.183.
+
+## v108.183 — Switch a bind off and on
+
+- **Bind Enabled**, a check mark at the top of a Bind button's right-click
+  menu (`AxisPanel._set_bind_enabled()`). Unticked, the bind is switched
+  off: it keeps all its settings and its comment but sends nothing. Ticked
+  again, it is as it was. For trying a profile without one bind, or keeping
+  a spare bind ready.
+- A bind that is switched off takes no part: it is no band for the NoBack
+  or Rebound of the other binds, and nothing of it shows in Axis History.
+  Switched off while it holds a key or plays a macro, it lets go at once.
+- Its Bind button is ghosted (still dashed-outlined when selected), without
+  its Bind Dir line, NoBack line and Rebound dot, and its tip says it is
+  switched off. Being a check mark, a click on it leaves the menu open.
+- Saved with the profile (`"enabled": false`, written only for a bind that
+  is off); a profile from before has every bind on. Copy and Paste carry
+  it; Reset axis switches every bind on.
+- Untested on Windows, like v108.178 to v108.182.
+
+## v108.182 — Undo Paste
+
+- **Undo Paste** on a Bind button's right-click menu, under Paste. A paste
+  replaced a bind without asking and could not be taken back. What the bind
+  was (its settings and its comment) is now kept before each paste, and
+  *Undo Paste*, from any bind's menu on any axis, puts it back; the bind
+  lets go of its key first and starts from rest, as with a paste.
+- One step: the last paste only, and once. It is ghosted when there is
+  nothing to undo, and its tip names the bind it would put back. Loading
+  that bind's axis from a profile, or resetting the axis, leaves nothing to
+  undo. The status bar says what was undone; an undo counts as a change to
+  the profile.
+- Untested on Windows, like v108.178 to v108.181.
+
+## v108.181 — Copy and Paste a bind
+
+- **Copy and Paste on a Bind button's right-click menu** (`bind_copy.py`,
+  `AxisPanel._copy_bind()` / `_paste_bind()`). *Copy* takes everything that
+  makes the bind what it is: its keys, Bind Dir, Mode, Min%, Max%, DZone, Tap
+  Dwell, the Press/Repeat time, NoBack, the Rebound time, its macro, and its
+  comment. *Paste* replaces another bind with all of it: a bind of the same
+  axis, of another axis, or, after loading another profile, of that profile.
+- The copy is the Mapper's own (not Windows' clipboard), kept while the
+  Mapper runs, and can be pasted any number of times. Changing the copied
+  bind afterwards does not change the copy.
+- *Paste* is ghosted until a bind has been copied; its tip names the bind
+  the copy came from. The status bar says what was copied and where it went.
+- A bind that is pasted into stops first (a held key is released, a playing
+  macro stopped) and starts from rest. A paste counts as a change to the
+  profile, like any edit (in Auto Load the Manual On question comes up).
+- Untested on Windows, like v108.178 to v108.180.
+
+## v108.180 — The dot is clear of the Bind button's text
+
+- **Blank space at both sides of the label.** The Rebound dot bounced over
+  the first or last letters of the Bind button's text. A button with the dot
+  now keeps more blank space at each side of its label
+  (`BindButton.set_side_space()`): enough for the dot and a small gap, and
+  the same at both ends, so the label stays centred. The button grows by
+  that much; a bind without the dot is as it was.
+- The dot's distance from the end of the button follows the button's height
+  (it followed its width), so it does not move in as a button gets wider.
+- Untested on Windows, like v108.178 and v108.179.
+
+## v108.179 — Rebound off until chosen; a bouncing dot
+
+- **Rebound is off by default.** A new bind, and a bind loaded from a profile
+  that has no Rebound time for it, has Rebound off (the v108.177 and v108.178
+  tests gave every Tick bind and every bind with NoBack 150 ms). A time saved
+  in a profile is kept as it is.
+- **"Rebound: Off" recommends a starting point.** With the pointer on
+  *Rebound: Off* in a Bind button's menu, a tip comes up at once, without the
+  hover wait: "Rebound is off for this bind. Recommended starting point:
+  150 ms." It goes when the pointer moves on to the times (or anywhere else),
+  and comes up only where Rebound applies and no time is chosen. The 150 ms
+  item's own tip names it the recommended starting point.
+- **A tip keeps clear of a submenu that is about to open.** The tip of an
+  item with a submenu (Rebound, Load Backup, Switch to…, Positions Saved)
+  leaves the submenu's place free, so the two do not cover each other.
+- **A dot, bouncing up and down** (`ReboundBounce`): the upright line that
+  moved sideways in the v108.178 test is an amber dot at the end of the Bind
+  button on its Bind Dir side (right for POS, left for NEG, both for FULL).
+  It starts at the top, by the Bind Dir line, falls to the bottom and bounces
+  four times, lower each time, rests there, fades and starts again; with the
+  pointer away from the window it rests at the bottom.
+- Untested on Windows, like v108.178.
+
+## v108.178 — Rebound, tips of the Mapper's own, drop-downs that stay open
+
+- **"Settle" is "Rebound".** The guard is the rebound settle guard; in the
+  editor it reads *Rebound: 150 ms* (the Bind button's right-click menu, its
+  tip, Axis History's "held by Rebound"). A profile keeps the time as
+  `settle_ms`, so profiles saved with the v108.177 test load as they are.
+- **Rebound is ghosted where it does not apply.** A bind that is neither a
+  Tick nor has NoBack on shows *Rebound: 150 ms* greyed out. A disabled menu
+  item looked like any other before: the style sheet's text colour covered
+  every state (`QMenu::item:disabled` now has the ghost colour).
+- **A bouncing line on the Bind button** (`ReboundBounce`, title_effect.py):
+  a bind with Rebound has an upright amber line at the end of its button on
+  its Bind Dir side (right for POS, left for NEG, both for FULL). While the
+  pointer is over the window it starts a little way in, falls to the end and
+  bounces off it four times, lower each time, rests and starts again; with
+  the pointer away it rests at the end.
+- **Hover tips** (ui/tips.py, tip_place.py): every tip is shown in a window
+  of the Mapper's own, white on black, in the font of the Auto-Profiles,
+  Options and Display drop-downs, wrapped at the width of an axis's comment
+  box. It stands at the right edge of the button or text it explains, else
+  at the left edge, below or above: never under the mouse pointer, and inside
+  the Mapper's window while there is room (a drop-down's tip stays off the
+  drop-down and its open submenu; for something large it stands beside the
+  pointer). Qt still decides when a tip is due; moving on to a neighbouring
+  item brings the next tip up quickly.
+- **Drop-downs stay open** (`StayOpen`, menu_autoclose.py): a click on a
+  setting (an item with a check mark) changes it and leaves the drop-down
+  open, brought up to date; it closes once the mouse has left it. A Bind
+  button's menu now closes that way too. An item that opens a window or a
+  dialog (Axis History, Edit macro, Browse all backups), loads a profile,
+  moves the editor (Positions Saved) or restarts it (a Display size) closes
+  the drop-down as before, as does the Auto Load question when a change
+  brings it up.
+- **A Bind button's menu** uses the font of the menu bar's drop-downs.
+- **Display**: no blank line (a separator) before Positions Saved.
+- Untested on Windows: the tip window, the menus and the line are checked on
+  a model of Qt only.
+
+## v108.177 — Settle: the spring's bounce is not a new push
+
+- **A quick release from a high band could send the lower bind's key.** Let
+  go of the puck and its spring throws it back through the centre and out
+  again for a moment. To the binds that bounce looked like a new push: a
+  lower bind's NoBack was rearmed the moment the axis centred (or crossed to
+  the other side), and a lower Tick was crossed going out again. With crouch
+  at 37% and prone at 68%, going prone quickly sometimes ended in a crouch.
+- **Settle, per bind** (`settle.py`, `AxisPanel._advance_settle()`): once a
+  band higher than the bind was reached, a Tick bind or a bind with NoBack
+  may not start again until the axis has rested below the bind's own start
+  (or at the centre, or on the other side) for its Settle time without a
+  break. A hand takes longer than that to come back; the spring does not.
+  Only the way back from a higher band arms it: the way out is never
+  delayed, a bind with nothing above it is never held, and a bind without
+  NoBack that is not a Tick works as before.
+- **Right-click a Bind button > Settle**: Off, 50, 100, 150 (the default),
+  200, 250, 300, 400 or 500 ms; greyed out for a bind that is neither a Tick
+  nor has NoBack on. The Bind button's tip shows it. Saved with the bind
+  (`settle_ms`); a profile from before has 150 ms.
+- **Axis History** marks the bounce it kept quiet "held by Settle" (a hollow
+  light dot, like NoBack's) and counts it in the summary, so the Settle time
+  can be tuned by looking at a stroke.
+- A behaviour change to know: with Settle on, dipping below a lower Tick and
+  pushing out again in less than the Settle time, after a higher band, no
+  longer taps it. Set that bind's Settle lower, or Off, if that is wanted.
+- Untested on Windows with the device: the bounce in the tests is modelled
+  (80% let go, back out to 42% within 64 ms).
+
 ## v108.176 — Releases build themselves
 
 - **Pushing a version tag publishes the EXE.** A new GitHub Actions workflow

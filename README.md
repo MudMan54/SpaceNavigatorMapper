@@ -28,6 +28,68 @@ choose. Logic by Don Muddiman; code by Don Muddiman, ChatGPT and Claude.
   takes effect once the Bind Dir includes it. A bind with NoBack has a white
   line along its bottom that sweeps from the middle: left for NoBack −, right
   for NoBack +, both ways for both. The same menu has *Reset* for the axis.
+- **Rebound (the rebound settle guard), per bind.** Let go of the puck from a
+  high band and its spring bounces it back out for a moment; without the
+  guard that rebound can send a lower bind's key (prone, then a crouch nobody
+  asked for). Once a higher band was reached, a Tick bind or a bind with
+  NoBack stays quiet until the axis has rested below it for its Rebound time.
+  Rebound is off until you choose a time: right-click the Bind button >
+  *Rebound* (50 to 500 ms, or Off; ghosted for a bind with no use for it).
+  With the pointer on *Rebound: Off* a tip recommends the starting point,
+  150 ms. The way out is never delayed, and a bind with nothing above it is
+  never held. Raise it if the rebound still gets through; lower it if a quick
+  deliberate return feels held back. A bind with Rebound on has an amber dot
+  at the end of its button (the right end for POS, the left for NEG, both
+  for FULL) that falls from the top and bounces on the bottom like a ball
+  let go, each bounce lower. Its button keeps blank space at both sides of
+  the label, so the dot is clear of the text.
+- **Min Hold, per bind.** A Hold bind holds its key while the axis is in its
+  band, and a quick flick can be in a band for an instant: the key goes down
+  and up within 16 ms, and some games do not act on that. In Hold mode the
+  Tap Dwell line of Quick Bind is the bind's *Min Hold* (0 to 500 ms): the
+  key still goes down at once, and stays down at least that long. Saved with
+  the profile.
+- **A note with each profile.** *Options > Profile Note…* or a right-click on
+  the profile name: what the game or the Mapper needs set for the profile to
+  work. Marked *Important*, it makes the profile name flash red and white
+  when the profile is loaded, until the note has been opened once on this
+  PC; then the name stays red, at the next starts too. For profiles you
+  share.
+- **Axis History beside the editor.** *Options > Axis History* moves the
+  editor to the top left of its monitor and opens a window over the rest of
+  it (closing it puts the editor back): the last 5 of 10 seconds of any axes as
+  graphs (a scroll bar goes back), with the keys listed in rows that stand
+  still, each with how long it was held. Change a bind and try it while you
+  watch. The puck's Button 1 freezes the graphs from inside the game.
+  *Export CSV/HTML* saves a CSV and a chart report (HTML) with every setting
+  of the binds that fired.
+- **Switch a bind off without losing it.** Right-click a Bind button >
+  *Bind Enabled*: unticked, the bind keeps all its settings and its comment
+  but sends nothing, and the other binds work as if it were not there (it is
+  no band for their NoBack or Rebound). Its button is ghosted. Tick it to
+  have it back as it was.
+- **Copy and Paste a bind.** Right-click a Bind button > *Copy* takes all of
+  the bind's settings (keys, Bind Dir, Mode, Min%, Max%, DZone, Tap Dwell,
+  Min Hold, NoBack, Rebound, macro) and its comment; *Paste* on any other bind, of the
+  same axis or another, replaces that bind with them. The copy is kept while
+  the Mapper runs, so it can be pasted into another profile after loading
+  it. A bind that is pasted into lets go of its key first. *Undo Paste*, on
+  any Bind button's menu, takes the last paste back: the bind it went into
+  is as it was, comment included.
+- **Drop-downs stay open while you set things.** A click on a setting (an
+  item with a check mark: NoBack, a Rebound time, Device LED, Close to System
+  Tray...) changes it and leaves the drop-down open; it closes once the mouse
+  has left it, a Bind button's menu too. An item that opens a window or a
+  dialog, loads a profile, or moves or restarts the editor closes it as
+  before.
+- **Axis borders show what moves.** An axis panel's border blinks while the
+  axis moves and no keys are being sent (the Target off, or the Mapper itself
+  in front, in Manual On too): green for the axis moved the most, blue for
+  the others.
+- **Hover tips** are white on black, in the drop-downs' font, wrapped at the
+  width of an axis's comment box. A tip stands at the right or left edge of
+  the button or text it explains (or below or above it), never under the
+  mouse pointer, and inside the Mapper's window while there is room.
 - **Bind Dir at a glance.** A thin green line along the top of each Bind
   button sweeps from the middle: left for NEG, right for POS, both ways for
   FULL; no line for None.
@@ -72,10 +134,11 @@ choose. Logic by Don Muddiman; code by Don Muddiman, ChatGPT and Claude.
 - **Save/Reload** asks first, showing the file name. Keep it to save over the
   profile, or type a new name: the settings are saved as a new profile, which
   is then loaded; the old file stays as it is.
-- **Axis History** (Options): records the last 30 seconds of every axis, the
-  keys its binds send and where NoBack held one back, and shows them as a
-  graph with each bind's start line. Right-click an axis panel's border to see
-  that axis; Pause, Clear and Save as CSV are in the window.
+- **Axis History** (Options): records the last 10 seconds of every axis, the
+  keys its binds send (with how long each was held) and where NoBack or
+  Rebound held one back, and shows them as a graph with each bind's start
+  line. Right-click an axis panel's border to see that axis; Pause, Clear,
+  Export and Attach to editor are in the window.
 - **Device LED** on the original SpaceNavigator, **profile backups** on every
   save, and interface sizes from 85% to 110% (menu: Display); one set of
   sizing rules for every size (`tests/test_display_sizes.py`).
@@ -160,7 +223,12 @@ spnav_mapper/
   devices.py                HID reading and decoding, LED
   keyboard_io.py            scan codes and SendInput
   macros.py                 macro steps and their non-blocking player
-  axis_history.py           axis history recording, summary, CSV, graph shapes, window view (no Qt)
+  bind_copy.py              Copy and Paste of a bind: its settings and comment (no Qt)
+  settle.py                 the rebound settle guard ("Rebound"): the spring's bounce is not a new push (no Qt)
+  tip_place.py              where a hover tip goes: beside what it explains, off the pointer (no Qt)
+  axis_history.py           axis history recording, summary, CSV, graph shapes, key rows, window view (no Qt)
+  axis_history_report.py    the Axis History export's chart report: one HTML page with SVG graphs (no Qt)
+  profile_note.py           a profile's note: its place in the file, the name's flash states (no Qt)
   win32.py                  windows, processes, program names, target filter
   auto_profiles.py          Auto-Profiles rules (no Qt)
   backups.py                save with backup, restore
@@ -173,7 +241,9 @@ spnav_mapper/
     targets.py              target list and picker
     profiles.py             load / save / save-as / backups
     save_reload_dialog.py   Save/Reload's prompt, with the file name editable
-    axis_history_window.py  the Axis History window (several axes), its graphs and Options switch
+    axis_history_window.py  the Axis History window (several axes), its graphs and Options switch;
+                            attached to the editor; Export
+    profile_note_dialog.py  the profile's note: its dialog, the profile name's flash, Options > Profile Note…
     auto_profiles_menu.py   Auto-Profiles menu, timer, status label
     window_chrome.py        icon, title, tray, close-to-tray, Options and Display menus, closing
     placement.py            Display > Positions Saved; the editor's position per monitor
@@ -181,7 +251,9 @@ spnav_mapper/
     monitor_scale.py        per-monitor scale factors (before QApplication)
     scaling.py              S()/Sf() sizes and readable control heights
     system_font.py          Qt's default font size after a Windows scale change (until sign-out)
-    title_effect.py         hover shimmer on the title
+    title_effect.py         hover shimmer on the title; the Bind buttons' lines (Bind Dir, NoBack, Rebound)
+    tips.py                 the Mapper's own hover-tip window
+    menu_autoclose.py       drop-downs close once the mouse has left, not when a setting is clicked
     macro_editor.py         the macro step editor
     readme_viewer.py        the title's README drop-down: the PDF, or a window
     keyboard_popup.py, widgets.py, profile_marquee.py, ...

@@ -59,6 +59,8 @@ GROUPS = (
         (
             "ui/main_window.py",
             "ui/profiles.py",
+            "profile_note.py",
+            "ui/profile_note_dialog.py",
             "ui/targets.py",
             "ui/auto_profiles_menu.py",
             "ui/window_chrome.py",

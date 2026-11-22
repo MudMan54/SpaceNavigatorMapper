@@ -98,14 +98,33 @@ class ScaledHeaderButton(QPushButton):
 
 
 class BindButton(QPushButton):
+    MARGIN = 20  # blank space beside the label, both sides together (scaled; at least 14 px)
+    _side_space = 0  # v108.180: more blank space at each side, for the Rebound dot
+
     def sizeHint(self):
         """Size of the Bind button's label at the current font."""
         hint = super().sizeHint()
         # Keep short bindings compact, but still fit multi-key combinations.
         metrics = self.fontMetrics()
         label_width = max(metrics.horizontalAdvance("Bind #6"), metrics.horizontalAdvance(self.text()))
-        hint.setWidth(label_width + max(14, S(20)))
+        hint.setWidth(label_width + self.margin() + 2 * self._side_space)
         return hint
+
+    def margin(self):
+        """The blank space beside the label without the dot's room, both sides together, in pixels."""
+        return max(14, S(self.MARGIN))
+
+    def set_side_space(self, pixels):
+        """Keep `pixels` more blank space at each side of the label (v108.180).
+
+        The label stays centred, so a bind with the Rebound dot at an end of
+        its button has the same room at both ends and the dot is clear of
+        the text. The button grows by twice as much.
+        """
+        pixels = max(0, int(pixels))
+        if pixels != self._side_space:
+            self._side_space = pixels
+            self.updateGeometry()
 
     doubleClicked = pyqtSignal()
     rightClicked = pyqtSignal()  # the bind's NoBack menu

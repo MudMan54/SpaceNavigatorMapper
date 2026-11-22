@@ -1,7 +1,7 @@
 """Scroll overflowing text (profile names, comments) inside the existing Qt text rectangle."""
 
 from PyQt5.QtCore import QElapsedTimer, Qt, QTimer
-from PyQt5.QtGui import QPalette
+from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QLineEdit,
     QStyle,
@@ -60,17 +60,38 @@ class _Marquee:
     def _draw_name(self, painter, text, rect, overflow, role):
         """Paint the text at its current scroll position."""
         painter.setClipRect(rect)
-        painter.setPen(self.palette().color(role))
+        colour = getattr(self, "_name_colour", None)  # v108.187: an important note's red or white
+        painter.setPen(QColor(colour) if colour else self.palette().color(role))
         offset = scroll_offset(self._clock.elapsed(), overflow)
         rect.setLeft(rect.left() - offset)
         painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, text)
 
 
+NAME_COLOUR_MARK = "/* name colour */"  # what set_name_colour() adds to the field's own style sheet
+
+
 class ProfileDisplay(_Marquee, QLineEdit):
+    _name_colour = None
+
     def __init__(self, parent=None):
         """The read-only Profile name field, scrolling long names."""
         super().__init__(parent)
         self._init_marquee(self.textChanged)
+
+    def set_name_colour(self, colour):
+        """Show the text in `colour` ("#rrggbb"), or in its usual colour for None (v108.187).
+
+        For the profile name while its profile has an important note: red and
+        white in turn until the note has been opened, then red. The colour is
+        a rule added to the field's own style sheet (for a QLineEdit only, so
+        its tip keeps its colours); the rest of that sheet is left as it is.
+        """
+        if colour == self._name_colour:
+            return
+        self._name_colour = colour
+        own = self.styleSheet().split(NAME_COLOUR_MARK)[0]
+        self.setStyleSheet(own + (f"{NAME_COLOUR_MARK} QLineEdit {{ color:{colour}; }}" if colour else ""))
+        self.update()
 
     def paintEvent(self, event):
         """Paint the profile name at its scroll position."""

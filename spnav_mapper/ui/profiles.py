@@ -14,8 +14,10 @@ from ..auto_profiles import link_profile_to_program, unlink_profile_from_program
 from ..backups import restore_backup, save_with_backup
 from ..keyboard_io import combo_to_text
 from ..paths import CONFIG_DIR, LAST_CONFIG_FILE, LAST_PATH_FILE
+from ..profile_note import put_note
 from ..settings import AXES, REVISION_DATE, VERSION, ensure_dir
 from ..win32 import best_program_name, version_info_strings
+from .profile_note_dialog import note_loaded, take_note_from_profile
 from .save_reload_dialog import ask_save_reload_path
 from .widgets import _auto_mode_from_config
 from .window_chrome import refresh_title
@@ -26,6 +28,7 @@ class ProfilesMixin:
     def load_config(self):
         """Load button: choose a profile file and load it."""
         result = self._load_config_impl()
+        note_loaded(self)  # v108.187: an important note makes the name flash, until read on this PC
         refresh_title(self)
         return result
 
@@ -33,12 +36,14 @@ class ProfilesMixin:
         """Load the profile used last (start-up)."""
         result = self._load_last_config_impl()
         self._shadow_loaded = os.path.isfile(LAST_CONFIG_FILE)
+        note_loaded(self)
         refresh_title(self)
         return result
 
     def _load_config_from_path(self, path):
         """Load a profile file and refresh the title."""
         result = self._load_config_from_path_impl(path)
+        note_loaded(self)
         refresh_title(self)
         return result
 
@@ -255,6 +260,7 @@ class ProfilesMixin:
         """Put a profile's settings into every panel and control."""
         # First: a bind without its own Tap Dwell gets the profile's (v108.166).
         self.tap_down_ms = int(cfg.get("tap_down_ms", self.tap_down_ms))
+        take_note_from_profile(self, cfg)  # v108.187: its note, if it has one
         for name in AXES:
             if name in cfg.get("axes", {}):
                 self.axes[name].set_config(cfg["axes"][name])
@@ -353,7 +359,8 @@ class ProfilesMixin:
             "version": self.version_str,
         }
         cfg.update(self._target_fields())
-        return cfg
+        # v108.187: the profile's note, written only when there is one.
+        return put_note(cfg, self.profile_note, self.profile_note_important)
 
     def _target_fields(self):
         """The target program's profile fields, so Auto-Profiles and re-finding the

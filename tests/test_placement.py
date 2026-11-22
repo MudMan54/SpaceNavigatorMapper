@@ -203,7 +203,9 @@ def test_a_macro_bind_in_the_panel(results):
     # Double-click and right-click > Edit macro… open the macro editor.
     assert bind["editor opened"] == ["X Bind #1: macro", "X Bind #1: macro"]
     assert bind["label"] == "Macro (3)"
-    assert bind["tip"] == ["Macro, plays repeatedly:", "Tap Q", "Delay 100 ms", "Tap W"]
+    # v108.184: the tip's top line names the axis and the bind's direction.
+    assert bind["tip"][0] == "X axis, Bind #1: [None]"
+    assert bind["tip"][1:5] == ["Macro, plays repeatedly:", "Tap Q", "Delay 100 ms", "Tap W"]
     steps = [{"tap": ["q"]}, {"delay": 100}, {"tap": ["w"]}]
     assert bind["saved"] == {"mode": "Macro", "macro": steps, "macro_repeat": True}
     assert bind["loaded"] == ["Macro", steps, True, "Macro (3)"]
@@ -439,3 +441,292 @@ def test_keys_to_a_program_running_as_administrator(results):
         "runas",
         "Not restarted as administrator: the Windows prompt was declined.",
     ]
+
+
+def test_rebound_is_set_from_the_bind_buttons_menu(results):
+    # v108.177: the rebound settle guard, per bind, in the Bind button's right-click menu: for a
+    # Tick bind and a bind with NoBack on, kept in the profile for the binds that use it.
+    # v108.178: named Rebound (it was Settle in the v108.177 test), ghosted (disabled) for a bind
+    # with no use for it. v108.179: off until a time is chosen (150 ms in the earlier tests).
+    s = results["bind rebound"]
+    assert s["choices"] == [
+        "Off",
+        "50 ms",
+        "100 ms",
+        "150 ms",
+        "200 ms",
+        "250 ms",
+        "300 ms",
+        "400 ms",
+        "500 ms",
+    ]
+    assert s["hold without noback"] == ["Rebound: Off", False, ["Off"]]
+    assert s["tick"] == ["Rebound: Off", True, ["Off"]]
+    # v108.178: the menu stays open, so it is brought up to date in place: NoBack clicked
+    # (Rebound is no longer ghosted), then 250 ms (the line and the check mark follow).
+    assert s["hold with noback"] == ["Rebound: Off", True, ["Off"]]
+    assert s["same menu after 250 ms"] == ["Rebound: 250 ms", True, ["250 ms"]]
+    assert s["after choosing"] == [
+        ["Rebound: 250 ms", True, ["250 ms"]],
+        ["Rebound: 150 ms", True, ["150 ms"]],
+    ]
+    assert s["off again"] == ["Rebound: Off", True, ["Off"]]
+    assert s["tips"] == [
+        [
+            "Rebound: 250 ms (quiet through the spring's rebound)",
+            "Right-click: Bind Enabled, NoBack, Rebound, Copy, Paste, Edit macro, Reset axis",
+        ],
+        ["Right-click: Bind Enabled, NoBack, Rebound, Copy, Paste, Edit macro, Reset axis"],
+        ["Rebound: Off", "Right-click: Bind Enabled, Rebound, Copy, Paste, Edit macro, Reset axis"],
+    ]
+    assert s["menu tips"] == [
+        "Rebound (the rebound settle guard)",
+        "Rebound is for a Tick bind and for a bind with NoBack on",
+        "Rebound is off for this bind",
+    ]
+    assert s["recommended"] == ["150 ms"]
+    # Saved for the binds that use it; a profile without it (from before v108.177, or a bind
+    # that had no use for it) and a new bind have it off.
+    assert s["saved"] == [250, None, 0, 150, 100] and s["loaded"] == [250, 0, 0, 150, 100]
+    assert s["older profile"] == [0, 0] and s["new bind"] == 0
+    # v108.178: the bouncing dot at the end of the button, on the side(s) Rebound works:
+    # POS + NoBack: right; no Rebound: none; Tick with Rebound off: none; FULL Tick: both; NEG: left.
+    assert s["dots"] == [["+", True], None, ["", False], ["+-", True], ["-", True], None]
+    # v108.180: a button with the dot keeps blank space at both sides of its label (the label
+    # stays centred), enough for the dot and its gap; the others are as they were.
+    space = s["side space"]
+    assert space[0] == space[3] == space[4] > 0 and space[1] == space[2] == space[5] == 0
+    assert s["room for the dot"] == [True, True, True]
+    assert s["wider by"] == 2 * space[0]
+
+
+def test_rebound_off_recommends_a_starting_point_at_once(results):
+    # v108.179: with the pointer on "Rebound: Off" a tip recommending 150 ms comes up at once
+    # (no hover wait), only where Rebound applies and is off. It leaves like any tip, when the
+    # pointer moves on to the times.
+    s = results["bind rebound"]
+    assert s["popup, no use for it"] is None  # ghosted: nothing to recommend
+    assert s["popup, off"] == "Rebound is off for this bind" and s["popup beside the menu"]
+    assert s["popup, time chosen"] is None
+
+
+def test_rebound_dot_bounces_and_comes_to_rest(results):
+    # v108.178: like a ball let go. v108.179: a dot bouncing up and down at the end of the button
+    # (an upright line moving sideways before): it starts at the top, touches the bottom four
+    # times, bounces lower each time, rests at the bottom and fades; at rest with the pointer away.
+    dot = results["rebound dot"]
+    assert dot["attribute"] and dot["sides"] == "+-"
+    assert dot["at rest"] == [0.0, 170]
+    assert dot["starts at the top"] == 1.0
+    assert dot["touches the bottom"] == [0.0, 0.0, 0.0, 0.0]
+    heights = dot["bounce heights"]
+    assert heights == sorted(heights, reverse=True) and 0 < heights[-1] < heights[0] < 1
+    assert dot["rests at the bottom"] and dot["fades at rest"]
+    assert dot["up and down only"] == [True, True]
+    assert dot["ends"][0] > 100 and dot["ends"][1] < 20  # the right end and the left end of a 120 px button
+    assert dot["inside the button"] and dot["no side"] == []
+
+
+def test_a_click_on_a_setting_leaves_the_drop_down_open(results):
+    # v108.178: Qt closes a menu on every click. A click on a setting (an item with a check
+    # mark) is taken before the menu sees it: the setting changes and the menu stays, and is
+    # brought up to date. Everything else is left to the menu, which closes: a command, an item
+    # that opens a window (marked), a ghosted item, a submenu's heading, the right button.
+    m = results["menus stay open"]
+    assert m["watched"] == [True, True]  # the submenu too
+    assert m["setting"] == [True, True, ["menu"]]
+    assert m["setting again"] == [True, False]
+    assert not any(m["others"].values()), m["others"]
+    assert m["untouched"] == [False, False, False]
+    # A Bind button's menu closes like the menu bar's: not before the mouse has been over it
+    # (it opens beside the button), then 0.4 s after the mouse has left it.
+    assert m["popup"] == [[False, True], [False, True], [False, True], [False, True], [True, False]]
+
+
+def test_tips_are_shown_in_the_mappers_own_window(results):
+    # v108.178: white on black, in the drop-downs' font, wrapped at the comment box's width, at
+    # the edge of what they explain (never under the pointer) and inside the window.
+    t = results["tips"]
+    assert t["nothing to show"] is False and t["handled"] is True  # Qt's own tip is not shown as well
+    assert t["text"] == "Save these settings as a new profile." and t["visible"]
+    assert t["font"] == 11.0
+    assert t["beside the button"] == [6, 0]  # after its right edge, level with its top
+    assert t["again is the same tip"] == [True, True]
+    assert t["stays while over the button"] is True
+    assert t["leaves with the pointer"] == [False, True]  # ... and the next tip may come up quickly
+    assert t["leaves on a key"] == [False, True]
+    assert t["wrapped"] == [True, 300, 300] and t["inside the window"]
+    assert t["menu"][0] == "tuple"
+    assert t["show time"] == [10000, 14000]
+
+
+def test_a_bind_is_copied_and_pasted_with_all_its_settings_and_its_comment(results):
+    # v108.181: Copy and Paste on a Bind button's right-click menu. Copy takes everything that
+    # makes the bind what it is, and its comment; Paste puts it into any bind, of any axis.
+    c = results["bind copy and paste"]
+    assert c["menu"] == [
+        "Bind Enabled",
+        "NoBack",
+        "Rebound: Off",
+        "Copy",
+        "Paste",
+        "Undo Paste",
+        "Edit macro…",
+        "Reset Z axis",
+    ]
+    # Nothing copied yet: Paste is ghosted and says why.
+    assert c["paste before a copy"] is False and c["paste tip before"] == "Nothing copied yet"
+    assert c["copied"] == [
+        "Z Bind #2",
+        "Copied Z Bind #2. Right-click a bind > Paste.",
+        0,
+    ]  # copying edits nothing
+    assert c["paste after a copy"] == [True, True]  # its tip names the bind it was copied from
+    # The bind pasted into was holding its key: released first, and it starts from rest.
+    assert c["released"] == [[["q"], False]]
+    assert c["pasted"] == {
+        "direction": "Plus",
+        "combo": ["ctrl", "c"],  # as copied: the source was changed afterwards
+        "mode": "Press/Repeat",
+        "min": 37,
+        "max": 66,
+        "repeat_ms": 140,
+        "tap_ms": 45,
+        "comment": "crouch",
+        "noback_plus": True,
+        "noback_minus": False,  # the bind's own NoBack - is replaced too
+        "settle_ms": 250,
+        "dead": 12,
+    }
+    assert c["state"] == [False, "crouch", "CTRL+C"]
+    assert c["quick bind shows it"] == ["Plus", "Press/Repeat"]  # it was the selected bind
+    assert c["said"] == "Pasted Z Bind #2 into X Bind #4. Undo Paste takes it back."
+    assert c["edits"] == 1  # a paste is a change to the profile (Auto Load offers Manual On)
+    assert c["other binds untouched"] and c["again"]
+    assert c["tips"] == ["Right-click: Bind Enabled, NoBack, Rebound, Copy, Paste, Edit macro, Reset axis"]
+    assert c["after clear"] == [False, False]
+
+
+def test_a_paste_can_be_undone(results):
+    # v108.182: Undo Paste on any Bind button's menu takes the last paste back: the bind it went
+    # into is as it was, comment included, and at rest. One step, once.
+    c = results["bind copy and paste"]
+    assert c["undo before a paste"] == [False, "Nothing to undo"]
+    assert c["undo after a paste"] == [True, True]  # its tip names the bind: "X Bind #4"
+    assert c["undone"] == [True, "lean left", "Q"]
+    assert c["undone, at rest"] is False
+    assert c["said after undo"] == "Paste undone: X Bind #4 is as it was."
+    assert c["edits after undo"] == 2  # the undo is a change to the profile too
+    assert c["undo once only"] == [False, False]
+    # Loading that axis from a profile, or resetting it, leaves nothing to undo (another axis
+    # being loaded does not matter).
+    assert c["forgotten on load"] == ["X Bind #1", ""]
+    assert c["forgotten on reset"] == ""
+
+
+def test_a_bind_is_switched_off_and_on_from_its_menu(results):
+    # v108.183: Bind Enabled, a check mark at the top of a Bind button's menu. Unticked, the
+    # bind is switched off: it keeps its settings and its comment, sends nothing, shows ghosted
+    # without its lines and dot; ticked again it is as before.
+    e = results["bind enabled"]
+    assert e["menu"][0] == "Bind Enabled" and e["ticked"] and e["checkable"]
+    assert e["on"] == ["bound", "C", [True, True, True]]  # Bind Dir line, NoBack line, Rebound dot
+    assert e["released"] == [[["c"], False]]  # it was holding its key: let go at once
+    assert e["off"] == ["ghosted", "C", [False, False, False]]
+    assert e["unticked in the same menu"] is False  # the menu stays open and shows it
+    assert e["said off"] == "Z Bind #2 is switched off: it sends nothing."
+    assert e["tip off"] == [
+        "Z axis, Bind #2: POS (+)",
+        "Switched off: sends nothing (right-click > Bind Enabled)",
+    ]
+    assert e["sent while off"] == []
+    assert e["selected while off"] == "selected, ghosted"
+    # Only a bind that is off says so in the profile; a profile from before has every bind on.
+    assert e["saved"] == [None, False, None] and e["loaded"] == [True, False, True]
+    assert e["keeps its settings"] == [["c"], "Hold", 37, "crouch", 150]
+    assert e["older profile"] is True
+    assert e["pasted"] is False  # Copy and Paste carry it
+    assert e["menu shows it off"] is False
+    assert e["on again"] == [["bound", "C", [True, True, True]], True, "Z Bind #2 is on.", None]
+    assert e["edits"] == 3  # off, the paste, on: each a change to the profile
+    assert e["after reset"] is True
+
+
+def test_the_border_blinks_whenever_no_keys_are_sent_green_for_the_axis_moved_most(results):
+    # v108.184: the panel border blinked only with the Target off, so never in Manual On, where
+    # the Target is always on. It blinks whenever the axis moves and no keys are being sent: the
+    # Mapper itself in front (it never types into itself) or the Target off. The axis moved the
+    # most blinks green, the others blue.
+    b = results["border blink"]
+    assert b["manual on, mapper in front"] == [True, ["#22c55e", "#86efac"]]  # green: moved the most
+    assert b["another axis, moved less"] == [True, ["#60a5fa", "#93c5fd"]]  # blue
+    assert b["keys being sent"] == [False, [None, None]]  # the game in front: no blink
+    assert b["target off"] == [True, ["#22c55e", "#86efac"]]  # as before, and green for the most moved
+    assert b["inside the dead zone"] == [False, [None, None]]
+    # The most moved: the largest beyond its own dead zone; none at rest or inside the dead zones.
+    assert b["moved most"] == [None, "Y", None, "X"]
+    # The Bind button's own blink, when its band is reached, follows the same rule.
+    assert b["bind blink"] == [True, True]
+
+
+def test_a_bind_buttons_tip_names_the_axis_and_the_direction(results):
+    # v108.184: the top line of the tip, kept up to date with the Bind Dir.
+    assert results["border blink"]["tip top lines"] == [
+        "Z axis, Bind #3: [None]",
+        "Z axis, Bind #3: POS (+)",
+        "Z axis, Bind #3: NEG (-)",
+        "Z axis, Bind #3: Full",
+    ]
+
+
+def test_a_bind_button_blinks_with_the_border_and_does_not_flicker(results):
+    # v108.185: a Bind button whose band is reached while no keys are being sent was greyed on
+    # every tick and restored by a timer 120 ms later, so it flickered some sixty times a second
+    # for as long as the band was held (in Manual On too since v108.184). It blinks grey in step
+    # with the panel's border instead.
+    b = results["border blink"]
+    assert b["blinks with the border"] == [[True, False], [False, False], [True, False]]
+    assert b["style changes in half a second"] == 3  # with the border's timer; some thirty before
+    assert b["blinking"] == [0]
+    assert b["both in their bands"] == [[0, 1], [True, True]]
+    assert b["one band left"] == [[0], [True, False]]  # its own style again at once
+    assert b["keys being sent again"] == [[], [True, True]]
+
+
+def test_reset_gives_each_bind_its_dzone_back(results):
+    # v108.185: Reset set the axis's dead zone but left each bind the DZone it had. A bind with
+    # DZone 0% stayed at 0% and, reset to Full with Min 0%, was reached with the puck at rest:
+    # with a key picked, its button blinked at once (and its key would have been held all the time).
+    b = results["border blink"]
+    assert b["DZone after reset"] == [5]
+    assert b["at rest after reset"] == [0, [], False]  # nothing reached, nothing blinking
+
+
+def test_a_paused_axis_history_view_outlives_the_rolling_window(results):
+    # v108.186: Pause froze only the clock; the view still read the live history, whose rolling
+    # 30 s window kept trimming, so a paused view drained away from the left in ~20 s (with 10 s
+    # shown). Pause now freezes a copy: the view holds for as long as needed, the summary and
+    # Save as CSV read the same frozen view, and Resume returns to live.
+    # v108.187: 10 s are kept (30 before) and 5 shown; the scroll bar goes back over the rest.
+    h = results["history pause"]
+    assert h["taps before pause"] == 3  # of the four taps in 12 s, the first is older than 10 s
+    assert h["paused view"] == [True, 1]  # the 5 s in view at the pause hold the last tap
+    assert h["scrolled back"] == [5.0, 2, 3]  # 5 s back: the two taps before; the capture has all 3
+    assert h["live rolled on"] == [0, True]  # half a minute later the live window has none left
+    assert h["paused view unchanged"] is True
+    assert h["summary still has the taps"] is True
+    assert h["resume returns to live"] == [0, True]
+
+
+def test_axis_history_attaches_on_the_monitor_windows_names(results):
+    # v108.189: the editor is on the second monitor, and Qt names the first (it can, with
+    # monitors at different scale factors). Opening Axis History attached moves the editor to
+    # the top left of the monitor Windows has it on; before, Qt was asked, and the editor went
+    # to the top left of the other monitor.
+    h = results["history monitor"]
+    assert (h["qt names"], h["screen"]) == ("\\\\.\\DISPLAY1", "\\\\.\\DISPLAY2")
+    assert h["editor"] == [3840 - 7, 0, 300, 400]  # the second monitor starts at x=3840
+    x, y, width, _height = h["history"]
+    assert x > h["editor"][0] and y == 0 and x + width <= 3840 + 1920 + 16
+    assert h["notes"] == ["Axis History attached on \\\\.\\DISPLAY2: editor moved from 4340,200 to 3833,0"]
+    assert h["editor back"] is True  # closing puts it back

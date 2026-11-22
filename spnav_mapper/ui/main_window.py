@@ -44,11 +44,13 @@ from ..settings import (
 from ..win32 import foreground_window, is_own_window, same_process
 from . import scaling as _ui_scaling
 from .auto_profiles_menu import AutoProfilesMixin
+from .axis_history_window import freeze_button_pressed
 from .axis_panel import AxisPanel
 from .editor_fit import fit_controls_to_text
 from .keyboard_popup import KeyboardPopup
 from .profile_buttons import ProfileButtonRow
 from .profile_marquee import ProfileDisplay, ScrollingLineEdit
+from .profile_note_dialog import install_profile_note
 from .profiles import ProfilesMixin
 from .scaling import (
     S,
@@ -251,6 +253,10 @@ class MainWindow(ProfilesMixin, TargetsMixin, AutoProfilesMixin, WindowChromeMix
         # Clicking "Profile:" or the profile name opens the target list.
         lbl_profile.clicked.connect(lambda _checked=False: self._show_target_picker())
         self.profile_display.mousePressEvent = self._show_target_picker
+        # v108.187: the profile's note. A right-click on the name opens it, and
+        # so does a click while the name flashes for an important note not yet
+        # opened; otherwise a click opens the target list as before.
+        install_profile_note(self)
         left_v.addLayout(row_combo)
 
         row_actions = QHBoxLayout()
@@ -536,6 +542,12 @@ class MainWindow(ProfilesMixin, TargetsMixin, AutoProfilesMixin, WindowChromeMix
                 background-color:palette(highlight);
                 color:palette(highlighted-text);
             }
+            /* v108.178: an item that does not apply is ghosted, like the
+               ghosted labels of an axis (Rebound for a bind that has no use for it). */
+            QMenu::item:disabled { color:rgba(148,163,184,0.55); }
+            /* v108.178: tips are white on black. The Mapper shows its tips in a
+               window of its own (ui/tips.py); this is for any Qt still shows itself. */
+            QToolTip { background-color:#000000; color:#ffffff; border:1px solid #ffffff; padding:3px; }
             QLineEdit { background:#1f2937; color:#e5e7eb; border:1px solid #334155; border-radius:4px; padding:__INPUT_PAD_Y__px __INPUT_PAD_X__px; }
             QCheckBox { color:#e2e8eb; }
         """.replace("__BUTTON_PAD_Y__", str(_ui_scaling.button_padding(vertical=4, horizontal=8)[0]))
@@ -642,6 +654,21 @@ class MainWindow(ProfilesMixin, TargetsMixin, AutoProfilesMixin, WindowChromeMix
             return True
         return bool(fg and self.target_hwnd and same_process(fg, self.target_hwnd))
 
+    def _axis_moved_most(self):
+        """The axis farthest from its centre just now, beyond its dead zone (None when all are at rest).
+
+        v108.184: its panel border blinks green, the other moving axes' blue.
+        """
+        best, most = None, 0.0
+        for i, name in enumerate(AXES):
+            try:
+                value = abs(float(self.spnav.axes[i]))
+                if value >= self.axes[name].dead / 100.0 and value > most:
+                    best, most = name, value
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                continue
+        return best
+
     def refresh_gui(self):
         """Each GUI tick: feed axis values and button changes to the binds."""
         fg = foreground_window()  # one look per tick
@@ -650,6 +677,7 @@ class MainWindow(ProfilesMixin, TargetsMixin, AutoProfilesMixin, WindowChromeMix
         self.spnav.tick()
         allow = self._allow_output_now(fg)
         cur = self.spnav.buttons & 0x03
+        self._top_axis = self._axis_moved_most()
         for i, name in enumerate(AXES):
             self.axes[name].update_val(self.spnav.axes[i], allow)
         guard = getattr(self, "_elevation", None)
@@ -671,6 +699,15 @@ class MainWindow(ProfilesMixin, TargetsMixin, AutoProfilesMixin, WindowChromeMix
         self._repolish(btn_widget)
         if pressed:
             self._flash_hw_button_label(idx)  # red pulse on Button 1 / 2
+
+        # v108.188: while the Axis History window is open, Button 1 freezes and
+        # resumes its graphs, whatever it is bound to; its own key is not sent.
+        if freeze_button_pressed(self, idx, pressed):
+            if self._hw_btn_active[idx]:  # held since before the window opened: let go
+                if combo:
+                    send_combo(combo, False)
+                self._hw_btn_active[idx] = False
+            return
 
         if not combo or not allow:
             self._hw_btn_active[idx] = False

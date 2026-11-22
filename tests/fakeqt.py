@@ -1688,8 +1688,23 @@ class _Textual(QWidget):
 
 
 class QLabel(_Textual):
-    def setWordWrap(self, *a):
+    def setWordWrap(self, on=True):
+        self._wrap = bool(on)
+
+    def wordWrap(self):
+        return getattr(self, "_wrap", False)
+
+    def setFrameStyle(self, *a):  # QLabel is a QFrame
         pass
+
+    def setLineWidth(self, *a):
+        pass
+
+    def heightForWidth(self, width):
+        """The text's height when wrapped at `width`: its one-line size folded into lines."""
+        hint = self.sizeHint()
+        lines = max(1, -(-int(hint.width()) // max(1, int(width))))
+        return int(hint.height()) * lines
 
     def setTextFormat(self, *a):
         pass
@@ -2155,6 +2170,73 @@ class QTextBrowser(QWidget):
         self._external_links = bool(on)
 
 
+class QPlainTextEdit(QWidget):
+    """A plain multi-line text box (the profile note)."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*[x for x in a if isinstance(x, QObject)], **k)
+        self._doc = next((str(x) for x in a if isinstance(x, str)), "")
+        self._placeholder = ""
+
+    def setPlainText(self, text):
+        self._doc = str(text)
+
+    def toPlainText(self):
+        return self._doc
+
+    def setPlaceholderText(self, text):
+        self._placeholder = str(text)
+
+    def placeholderText(self):
+        return self._placeholder
+
+    def setTabChangesFocus(self, on):
+        self._tab_changes_focus = bool(on)
+
+    def setReadOnly(self, on):
+        self._read_only = bool(on)
+
+
+class QScrollBar(QWidget):
+    """A scroll bar: a range, a page step and a value, with valueChanged."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*[x for x in a if isinstance(x, QObject)], **k)
+        self._lo, self._hi, self._value, self._page, self._single = 0, 99, 0, 10, 1
+
+    def setRange(self, lo, hi):
+        self._lo, self._hi = int(lo), max(int(lo), int(hi))
+        self.setValue(self._value)
+
+    def minimum(self):
+        return self._lo
+
+    def maximum(self):
+        return self._hi
+
+    def setPageStep(self, n):
+        self._page = int(n)
+
+    def pageStep(self):
+        return self._page
+
+    def setSingleStep(self, n):
+        self._single = int(n)
+
+    def singleStep(self):
+        return self._single
+
+    def value(self):
+        return self._value
+
+    def setValue(self, value):
+        value = max(self._lo, min(self._hi, int(value)))
+        if value != self._value:
+            self._value = value
+            if not self._blocked:
+                self.valueChanged.emit(value)
+
+
 class QListWidgetItem:
     def __init__(self, text=""):
         self._text = str(text)
@@ -2368,6 +2450,16 @@ class QMenu(QWidget):
 
     def title(self):
         return self._mtitle
+
+    ROW = 24  # the height of an item
+
+    def actionAt(self, pos):
+        """The item at `pos`: the items are rows of ROW pixels from the top."""
+        row = int(pos.y()) // self.ROW
+        return self._actions[row] if 0 <= row < len(self._actions) and pos.y() >= 0 else None
+
+    def actionGeometry(self, action):
+        return QRect(0, self._actions.index(action) * self.ROW, self.width(), self.ROW)
 
     def setTitle(self, t):
         self._mtitle = str(t)

@@ -1,5 +1,6 @@
 """One axis panel: six binds, the Quick Bind editor, NoBack per bind, Tick and Macro modes."""
 
+import math
 import time
 from functools import partial
 
@@ -7,6 +8,7 @@ from PyQt5 import QtWidgets
 from PyQt5.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
+    QActionGroup,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -17,11 +19,21 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ..axis_history import DOWN, HELD, MACRO, NOBACK_UP, TAP, UP, unsent
+from .. import bind_copy
+from ..axis_history import DOWN, HELD, MACRO, NOBACK_UP, REBOUND_HELD, TAP, UP, unsent
 from ..keyboard_io import combo_to_text, send_combo
 from ..macros import MacroRun, normalize_macro, step_text
 from ..settings import BINDS_PER_AXIS
+from ..settle import (
+    SETTLE_MS_CHOICES,
+    SETTLE_MS_DEFAULT,
+    SETTLE_MS_RECOMMENDED,
+    SettleGuard,
+    clamp_settle_ms,
+    settle_text,
+)
 from .keyboard_popup import KeyboardPopup
+from .menu_autoclose import autoclose_popup, keep_open
 from .profile_marquee import ScrollingLineEdit
 from .scaling import (
     S,
@@ -32,7 +44,8 @@ from .scaling import (
     set_readable_square,
 )
 from .taps import MIN_UP_MS, TapSender, repeat_interval_ms
-from .title_effect import BindDirSweep, NoBackSweep
+from .tips import show_tip_now
+from .title_effect import BindDirSweep, NoBackSweep, ReboundBounce
 from .widgets import BindButton
 
 TICK_MODE = "Tick"
@@ -40,11 +53,32 @@ MACRO_MODE = "Macro"  # v108.141: the bind plays its macro steps
 MODES = ["Hold", "Press/Release", "Release-only", "Press/Repeat", TICK_MODE, MACRO_MODE]
 
 
+def bind_enabled(bind):
+    """False for a bind switched off on its menu (v108.183): it keeps its settings and sends nothing."""
+    return bool(bind.get("enabled", True))
+
+
 def bind_has_output(bind):
-    """True when the bind has something to send: its macro in Macro mode, else its key."""
+    """True when the bind has something to send: its macro in Macro mode, else its key.
+
+    v108.183: and it is not switched off. A bind that is off takes no part:
+    it sends nothing and is no band for the NoBack or Rebound of the others.
+    """
+    if not bind_enabled(bind):
+        return False
     if bind.get("mode") == MACRO_MODE:
         return bool(bind.get("macro"))
     return bool(bind.get("combo"))
+
+
+# A Bind Dir as Quick Bind shows it (v108.184: in the top line of a Bind button's tip).
+DIRECTION_TEXT = {"Plus": "POS (+)", "Minus": "NEG (-)", "Full": "Full", None: "[None]"}
+
+BIND_ENABLED_TIP = (
+    "Ticked: this bind works. Unticked, it is switched off: it keeps all its settings and its comment "
+    "but sends nothing, and the other binds work as if it were not there.\n"
+    "For trying a profile without one bind, or keeping a spare bind ready."
+)
 
 
 # Greyed-out Quick Bind controls (the mode does not use them). v108.172: fainter,
@@ -111,6 +145,26 @@ NOBACK_TIPS = {
     "-": "On the way back from the - side (the axis moving +): once a higher band was reached, "
     "this bind stays quiet until the axis centres, drops below every band or crosses to the other side.",
 }
+
+
+# v108.177: the rebound settle guard, per bind (the Bind button's right-click
+# menu). v108.178: named Rebound there (it was Settle in the v108.177 test).
+REBOUND_TIP = (
+    "Rebound (the rebound settle guard): after the axis comes back from a higher band, this bind "
+    "stays quiet until the axis has rested below it this long.\n"
+    "It keeps the spring's rebound after a quick release from sending this bind's key. "
+    "The way out is never delayed. Off: no wait."
+)
+# v108.179: Rebound is off until a time is chosen. With the pointer on
+# "Rebound: Off" this comes up at once, and goes when the pointer moves on to the times.
+REBOUND_OFF_TIP = (
+    f"Rebound is off for this bind. Recommended starting point: {SETTLE_MS_RECOMMENDED} ms.\n"
+    "It keeps the spring's rebound after a quick release from sending this bind's key: "
+    "raise it if the rebound still gets through."
+)
+REBOUND_UNUSED_TIP = (
+    "Rebound is for a Tick bind and for a bind with NoBack on: this bind has no use for it.\n\n" + REBOUND_TIP
+)
 
 
 def _covers(direction, side):
@@ -235,11 +289,39 @@ QUICK_BIND_TIPS = {
     ),
     "tap down": "5 ms shorter. Hold to keep shortening.",
     "tap up": "5 ms longer. Hold to keep lengthening.",
+    # v108.187: in Hold mode the Tap Dwell line is the bind's Min Hold.
+    "hold": (
+        "Min Hold: the shortest time the selected Hold bind keeps its key down, 0 to 500 ms.\n"
+        "The key still goes down at once. If the axis leaves the band sooner (a quick flick, or NoBack "
+        "letting go on the way back), the key-up waits until the key has been down this long; "
+        "coming back into the band meanwhile keeps the key down.\n"
+        "For a game that misses a key held only for an instant. 0: as before, the key is let go "
+        "as soon as the axis is clearly out of the band.\n"
+        "Saved with the profile, per bind. Axis History shows how long each key was held."
+    ),
 }
 
 # v108.166: Tap Dwell, per bind: how long a tap holds its key down.
 TAP_MS_DEFAULT, TAP_MS_MIN, TAP_MS_MAX, TAP_MS_STEP = 45, 0, 200, 5
 TAPPING_MODES = ("Press/Release", "Press/Repeat", TICK_MODE, MACRO_MODE)
+# v108.187: Min Hold, per bind: the shortest time a Hold bind keeps its key down.
+# 0 (the default) is as before: only the profile's own short guard ("min_hold_ms",
+# 60 ms), which a quick return through the band's start passes by.
+HOLD_MS_DEFAULT, HOLD_MS_MIN, HOLD_MS_MAX, HOLD_MS_STEP = 0, 0, 500, 5
+HOLD_MODE = "Hold"
+
+
+def clamp_hold_ms(value, default=HOLD_MS_DEFAULT):
+    """A Min Hold in ms, 0 to 500 (`default` for one that is not a number)."""
+    try:
+        return max(HOLD_MS_MIN, min(HOLD_MS_MAX, int(value)))
+    except (TypeError, ValueError):
+        return max(HOLD_MS_MIN, min(HOLD_MS_MAX, int(default)))
+
+
+def hold_text(ms):
+    """'Min Hold: 175ms', the width of three digits."""
+    return f"Min Hold: {int(ms):>3d}ms"
 
 
 def clamp_tap_ms(value, default=TAP_MS_DEFAULT):
@@ -319,6 +401,9 @@ class AxisPanel(QGroupBox):
                 "last_tap": 0.0,
                 "repeat_ms": 60,
                 "tap_ms": TAP_MS_DEFAULT,
+                "min_hold_ms": HOLD_MS_DEFAULT,
+                "settle_ms": SETTLE_MS_DEFAULT,
+                "enabled": True,
                 "last_on_ts": 0.0,
                 "dead": self.dead,
                 "noback_plus": False,
@@ -351,6 +436,13 @@ class AxisPanel(QGroupBox):
         )
         self._style_selected = button_qss(
             "QPushButton { background-color:#111827; color:#e5e7eb; border-radius:4px; border:1px solid #4b5563; padding:5px; font-weight:700; text-align:center; }"
+        )
+        # v108.183: a bind that is switched off is ghosted, like what does not apply elsewhere.
+        self._style_off = button_qss(
+            "QPushButton { background-color:rgba(75,85,99,0.5); color:rgba(156,163,175,0.6); border-radius:4px; border:1px solid rgba(75,85,99,0.7); padding:5px; text-align:center; }"
+        )
+        self._style_selected_off = button_qss(
+            "QPushButton { background-color:#111827; color:rgba(156,163,175,0.6); border-radius:4px; border:1px dashed #4b5563; padding:5px; font-weight:700; text-align:center; }"
         )
         self._build_ui()
         self._load_selected_into_qb()
@@ -636,12 +728,33 @@ class AxisPanel(QGroupBox):
         self._refresh_slot_btn(self.selected_index, force=True)
 
     def _change_tap(self, delta):
-        """Step the selected bind's Tap Dwell (0-200 ms)."""
+        """Step the selected bind's Tap Dwell (0-200 ms); in Hold mode, its Min Hold (0-500 ms)."""
         self._edited()
         b = self.binds[self.selected_index]
+        if b.get("mode") == HOLD_MODE:  # v108.187: the same line and − / + set Min Hold
+            b["min_hold_ms"] = clamp_hold_ms(self._bind_hold_ms(b) + int(delta))
+            self.tap_lbl.setText(hold_text(b["min_hold_ms"]))
+            self._refresh_slot_btn(self.selected_index, force=True)
+            return
         b["tap_ms"] = clamp_tap_ms(int(b.get("tap_ms", self._profile_tap_ms())) + int(delta))
         self.tap_lbl.setText(tap_text(b["tap_ms"]))
         self._refresh_repeat_note()
+
+    @staticmethod
+    def _bind_hold_ms(b):
+        """A bind's Min Hold in ms (0: none of its own)."""
+        return clamp_hold_ms(b.get("min_hold_ms"))
+
+    @staticmethod
+    def _held_ms(b, now=None):
+        """How long a Hold bind's key has been down, in ms."""
+        now = time.perf_counter() if now is None else now
+        return max(0.0, (now - b.get("last_on_ts", now)) * 1000.0)
+
+    def _hold_kept(self, b, now=None):
+        """True while a Hold bind's own Min Hold still keeps its key down (v108.187)."""
+        own = self._bind_hold_ms(b)
+        return own > 0 and self._held_ms(b, now) < own
 
     def _bind_tap_ms(self, b):
         """A bind's Tap Dwell (the profile's when it has none)."""
@@ -689,12 +802,30 @@ class AxisPanel(QGroupBox):
                 lines = ["Double Click to make the macro"]
         else:
             lines = [] if b["combo"] else ["Double Click to Set"]
+        if not bind_enabled(b):  # v108.183
+            lines.insert(0, "Switched off: sends nothing (right-click > Bind Enabled)")
+        # v108.184: the tip's top line names the axis and the bind's direction.
+        lines.insert(
+            0, f"{self.axis_name} axis, Bind #{idx + 1}: {DIRECTION_TEXT.get(b.get('direction'), '[None]')}"
+        )
         for sign in noback_names(b):
             lines.append(f"NoBack {sign} on (quiet on the way back)")
+        # v108.187: a Hold bind's Min Hold, when it has one.
+        if b.get("mode") == HOLD_MODE and self._bind_hold_ms(b) > 0:
+            lines.append(f"Min Hold: {self._bind_hold_ms(b)} ms (the key stays down at least this long)")
         # v108.162: a Tick bind's menu has no NoBack.
         tick = b.get("mode") == TICK_MODE
+        if self._settle_used(b):  # v108.177
+            settle_ms = self._settle_ms(b)
+            lines.append(
+                f"Rebound: {settle_ms} ms (quiet through the spring's rebound)"
+                if settle_ms
+                else "Rebound: Off"
+            )
         lines.append(
-            "Right-click: Edit macro, Reset axis" if tick else "Right-click: NoBack, Edit macro, Reset axis"
+            "Right-click: Bind Enabled, Rebound, Copy, Paste, Edit macro, Reset axis"
+            if tick
+            else "Right-click: Bind Enabled, NoBack, Rebound, Copy, Paste, Edit macro, Reset axis"
         )
         self.slot_btns[idx].setToolTip("\n".join(lines))
         self.slot_btns[idx].setText(label)
@@ -709,6 +840,8 @@ class AxisPanel(QGroupBox):
         """The Bind button's stylesheet: selected, bound or empty."""
         if selected is None:
             selected = idx == self.selected_index
+        if not bind_enabled(self.binds[idx]):  # v108.183: switched off
+            return self._style_selected_off if selected else self._style_off
         return (
             self._style_selected
             if selected
@@ -790,16 +923,21 @@ class AxisPanel(QGroupBox):
     def reset_axis(self):
         """Clear every bind of the axis back to the defaults."""
         self.dead = 5
+        bind_copy.forget_paste(self)  # v108.182
         for i, b in enumerate(self.binds):
             b.update(
                 min=0,
                 max=100,
+                dead=self.dead,  # v108.185: its DZone too (it kept the one it had, 0% included)
                 combo=None,
                 mode="Hold",
                 active=False,
                 comment="",
                 repeat_ms=100,
                 tap_ms=self._profile_tap_ms(),
+                min_hold_ms=HOLD_MS_DEFAULT,
+                settle_ms=SETTLE_MS_DEFAULT,
+                enabled=True,
                 last_on_ts=0.0,
                 direction="Full",
                 noback_plus=False,
@@ -808,6 +946,7 @@ class AxisPanel(QGroupBox):
                 macro_repeat=False,
             )
             self.stop_macros(i)
+            self._reset_settle()
             self.slot_btns[i].setText(f"Bind #{i + 1}")
             self.slot_btns[i].setStyleSheet(self._style_gray)
             self._refresh_bind_lines(i)
@@ -852,8 +991,11 @@ class AxisPanel(QGroupBox):
             return True
         return kind == UP and self.binds[idx].get("mode") == "Release-only"
 
-    def _record(self, idx, kind):
-        """Axis history: note what bind `idx` just did (when recording); in a dry run, as not sent."""
+    def _record(self, idx, kind, ms=None):
+        """Axis history: note what bind `idx` just did (when recording); in a dry run, as not sent.
+
+        v108.187: `ms` is how long the key was held (a key-up) or the tap's Tap Dwell.
+        """
         if self.history is None:
             return
         if self._starts_action(idx, kind):
@@ -862,7 +1004,7 @@ class AxisPanel(QGroupBox):
             return  # the run without NoBack only tells which binds would have started
         b = self.binds[idx]
         key = "macro" if b.get("mode") == MACRO_MODE else combo_to_text(b.get("combo"))
-        self.history.add_event(unsent(kind) if self._dry else kind, idx, key, self._raw_val)
+        self.history.add_event(unsent(kind) if self._dry else kind, idx, key, self._raw_val, ms)
 
     def _send_combo(self, combo, down):
         """Press or release a bind's combo (nothing in a dry run)."""
@@ -898,7 +1040,14 @@ class AxisPanel(QGroupBox):
         )
         side = dir_char or self._noback_side
         for idx in sorted(self._free_starts - self._starts):
-            if noback_on(self.binds[idx], side):
+            bind = self.binds[idx]
+            by_noback = noback_on(bind, side)
+            # v108.177: Rebound's mark where Rebound alone kept the bind quiet.
+            if idx in self._settle_held and not (
+                by_noback and self._noback_blocks(self._band_start(bind), False, cur_abs_pct)
+            ):
+                self._record(idx, REBOUND_HELD)
+            elif by_noback:
                 self._record(idx, HELD)
 
     def contextMenuEvent(self, event):
@@ -926,20 +1075,42 @@ class AxisPanel(QGroupBox):
         QTimer.singleShot(140, lambda: self.setStyleSheet(""))
         self.reset_axis()
 
+    _sending = False  # v108.184: keys may be sent on this tick (the Target is on and its program in front)
+
+    # The border's blink: (dark, light) blue, or green for the axis moved the most.
+    FLASH_BLUE = ("#60a5fa", "#93c5fd")
+    FLASH_GREEN = ("#22c55e", "#86efac")
+
+    def _is_top_axis(self):
+        """True when this axis is the one moved the most just now (v108.184)."""
+        return getattr(self.mainwin, "_top_axis", None) == self.axis_name
+
     def _toggle_motion_flash(self):
-        """Blink the panel border while the axis moves with output off."""
-        if getattr(self.mainwin, "activated", False):
+        """Blink the panel border while the axis moves and no keys are being sent.
+
+        v108.184: that is so with the Target off, and with it on while the
+        Mapper itself is in front (it never types into itself): in Manual On
+        too, where the Target is always on and the border never blinked. The
+        axis moved the most blinks green, the others blue.
+        """
+        if self._sending:
             self._stop_motion_flash()
             return
         self._motion_flash_on = not self._motion_flash_on
-        colour = "#60a5fa" if self._motion_flash_on else "#93c5fd"
+        dark, light = self.FLASH_GREEN if self._is_top_axis() else self.FLASH_BLUE
+        colour = dark if self._motion_flash_on else light
         self.setStyleSheet(f"QGroupBox {{ border: 1px solid {colour}; border-radius:5px; }}")
+        for idx in self._band_blink:  # v108.185: the Bind buttons in their band, in step
+            self._show_band_blink(idx, self._motion_flash_on)
 
     def _stop_motion_flash(self):
-        """Stop the motion blink and restore the border."""
+        """Stop the motion blink and restore the border (and the Bind buttons blinking with it)."""
         self._motion_timer.stop()
         self._motion_flash_on = False
         self.setStyleSheet("")
+        for idx in self._band_blink:
+            self._show_band_blink(idx, False)
+        self._band_blink = frozenset()
 
     def _show_bind_menu(self, idx):
         """Right-click on a Bind button: NoBack and Edit macro for the bind, Reset for the axis.
@@ -955,22 +1126,82 @@ class AxisPanel(QGroupBox):
             b = self.binds[idx]
         except IndexError:
             return
+        old = getattr(self, "_bind_menu", None)
+        if old is not None:
+            try:
+                old.deleteLater()  # the menu of the last right-click
+            except RuntimeError:
+                pass
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
+        # v108.183: switch the bind off and on again; off, it keeps its settings and sends nothing.
+        enabled_item = menu.addAction("Bind Enabled")
+        enabled_item.setCheckable(True)
+        enabled_item.setToolTip(BIND_ENABLED_TIP)
+        enabled_item.triggered.connect(
+            lambda _checked=False, a=enabled_item: self._set_bind_enabled(idx, a.isChecked())
+        )
         tick = b.get("mode") == TICK_MODE
         sides = "" if tick else DIRECTION_SIDES.get(b.get("direction"), "")
         if not sides and not tick:
             action = menu.addAction("NoBack")
             action.setEnabled(False)
             action.setToolTip("Choose a Bind Dir first: NoBack is for the way back from it.")
+        noback = []
         for side in sides:
             action = menu.addAction(f"NoBack {RETURN_SIGN[side]}")
             action.setCheckable(True)
-            action.setChecked(bool(b.get(NOBACK_KEYS[side])))
             action.setToolTip(NOBACK_TIPS[side])
             action.triggered.connect(
                 lambda _checked=False, s=side, a=action: self._set_bind_noback(idx, s, a.isChecked())
             )
+            noback.append((side, action))
+        # v108.177: the rebound settle guard, for a Tick bind and a bind with
+        # NoBack on. v108.178: named Rebound; ghosted for a bind with no use for it.
+        rebound = menu.addMenu("Rebound")
+        rebound.setToolTipsVisible(True)
+        group = QActionGroup(rebound)
+        group.setExclusive(True)
+        choices = []
+        for ms in SETTLE_MS_CHOICES:
+            action = rebound.addAction(settle_text(ms))
+            action.setCheckable(True)
+            group.addAction(action)
+            action.setToolTip(
+                "No wait: the bind may start again at once."
+                if ms == 0
+                else f"Quiet until the axis has rested below this bind for {ms} ms."
+                + (" The recommended starting point." if ms == SETTLE_MS_RECOMMENDED else "")
+            )
+            action.triggered.connect(lambda _checked=False, value=ms: self._set_bind_settle(idx, value))
+            choices.append((ms, action))
+        # v108.181: copy all of this bind's settings and its comment; paste them into another.
+        copy_item = menu.addAction("Copy")
+        copy_item.setToolTip(
+            "Copy all of this bind's settings and its comment: keys, Bind Dir, Mode, Min%, Max%, DZone, "
+            "Tap Dwell, Min Hold, NoBack, Rebound and macro.\n"
+            "Paste them into any bind: of this axis, of another axis, or of another profile after loading it."
+        )
+        copy_item.triggered.connect(lambda _checked=False: self._copy_bind(idx))
+        paste_item = menu.addAction("Paste")
+        source = bind_copy.source()
+        paste_item.setEnabled(bool(source))
+        paste_item.setToolTip(
+            f"Replace all of this bind's settings and its comment with those copied from {source}."
+            if source
+            else "Nothing copied yet: choose Copy on the bind to copy from first."
+        )
+        paste_item.triggered.connect(lambda _checked=False: self._paste_bind(idx))
+        # v108.182: take the last paste back, whichever bind it went into.
+        undo_item = menu.addAction("Undo Paste")
+        pasted_into = bind_copy.undo_name()
+        undo_item.setEnabled(bool(pasted_into))
+        undo_item.setToolTip(
+            f"Put {pasted_into} back as it was before the last paste (its settings and its comment)."
+            if pasted_into
+            else "Nothing to undo: no bind has been pasted into."
+        )
+        undo_item.triggered.connect(lambda _checked=False: self._undo_paste())
         edit = menu.addAction("Edit macro…")
         edit.setEnabled(b.get("mode") == MACRO_MODE)
         edit.setToolTip(
@@ -982,6 +1213,41 @@ class AxisPanel(QGroupBox):
         reset = menu.addAction(f"Reset {self.axis_name} axis")
         reset.setToolTip("Clears all six binds of this axis.")
         reset.triggered.connect(lambda _checked=False: self._reset_and_blink())
+
+        def refresh():
+            """The check marks and Rebound's line, as the bind is now (v108.178: the menu stays open)."""
+            bind = self.binds[idx]
+            used, current = self._settle_used(bind), self._settle_ms(bind)
+            rebound.setTitle(f"Rebound: {settle_text(current)}")
+            rebound.menuAction().setToolTip(
+                REBOUND_UNUSED_TIP if not used else REBOUND_TIP if current else REBOUND_OFF_TIP
+            )
+            rebound.menuAction().setEnabled(used)
+            for ms, action in choices:
+                action.setChecked(ms == current)
+            for side, action in noback:
+                action.setChecked(bool(bind.get(NOBACK_KEYS[side])))
+            enabled_item.setChecked(bind_enabled(bind))
+
+        def recommend():
+            """The pointer came onto "Rebound: Off": recommend a starting point, at once (v108.179)."""
+            bind = self.binds[idx]
+            if self._settle_used(bind) and self._settle_ms(bind) == 0:
+                show_tip_now(menu, rebound.menuAction())
+
+        rebound.menuAction().hovered.connect(recommend)
+        refresh()
+        menu._spnav_refresh = refresh
+        # v108.178: the font of the menu bar's drop-downs; a click on a setting
+        # leaves the menu open; it closes once the mouse has left it.
+        from .window_chrome import dropdown_font
+
+        font = dropdown_font(self.window())
+        if font is not None:
+            menu.setFont(font)
+            rebound.setFont(font)
+        keep_open(self, menu)
+        autoclose_popup(menu)
         self._bind_menu = menu  # kept alive while it is open
         menu.exec_(self._bind_menu_position(idx))
 
@@ -1001,6 +1267,119 @@ class AxisPanel(QGroupBox):
             self._reset_noback()
         self._refresh_slot_btn(idx, force=True)
 
+    def _set_bind_enabled(self, idx, on):
+        """Switch a bind on or off (v108.183). Off, it lets go of its key and stops its macro at once."""
+        self._edited()
+        b = self.binds[idx]
+        if not on:
+            self._stop_bind(idx)
+        b["enabled"] = bool(on)
+        b["active"] = False
+        self._reset_noback()
+        self._reset_settle()
+        self._refresh_slot_btn(idx, force=True)
+        self._say(f"{self._bind_name(idx)} is {'on' if on else 'switched off: it sends nothing'}.")
+
+    def _stop_bind(self, idx):
+        """Stop what a bind is doing: release its held key, stop its macro."""
+        b = self.binds[idx]
+        self.stop_macros(idx)
+        if (
+            not self._dry
+            and b.get("combo")
+            and b.get("active")
+            and b.get("mode") in ("Hold", "Press/Release", "Press/Repeat")
+        ):
+            send_combo(b["combo"], False, status_callback=self._status_cb)
+
+    def _bind_name(self, idx):
+        """A bind's name for messages: "Z Bind #2"."""
+        return f"{self.axis_name} Bind #{idx + 1}"
+
+    def _say(self, text, ms=2500):
+        """Show a short message in the window's status bar (nothing without one)."""
+        try:
+            self.mainwin.statusBar().showMessage(text, ms)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    def _copy_bind(self, idx):
+        """Copy a bind's settings and its comment (v108.181)."""
+        bind_copy.copy_bind(self.binds[idx], self.slot_comments[idx].text(), self._bind_name(idx))
+        self._say(f"Copied {self._bind_name(idx)}. Right-click a bind > Paste.")
+
+    def _paste_bind(self, idx):
+        """Replace a bind's settings and its comment with the copied bind's (v108.181).
+
+        v108.182: what the bind was is kept first, for Undo Paste.
+        """
+        data = bind_copy.copied()
+        if not data:
+            return False
+        bind_copy.remember_before_paste(
+            self, idx, self.binds[idx], self.slot_comments[idx].text(), self._bind_name(idx)
+        )
+        self._put_bind(idx, data["settings"], data["comment"])
+        self._say(f"Pasted {data['source']} into {self._bind_name(idx)}. Undo Paste takes it back.")
+        return True
+
+    def _undo_paste(self):
+        """Put the bind the last paste went into back as it was (v108.182). It may be another axis's."""
+        before = bind_copy.before_paste()
+        if not before:
+            return False
+        owner = before["owner"]
+        bind_copy.forget_paste()
+        try:
+            owner._put_bind(before["index"], before["settings"], before["comment"])
+        except (AttributeError, IndexError, RuntimeError, TypeError):
+            return False  # its panel is gone
+        self._say(f"Paste undone: {before['name']} is as it was.")
+        return True
+
+    def _put_bind(self, idx, settings, comment):
+        """Give a bind these settings and this comment (a paste, or its undo).
+
+        What the bind was doing stops first: its held key is released and its
+        macro stopped, and it starts from rest with the new settings.
+        """
+        self._edited()
+        b = self.binds[idx]
+        self._stop_bind(idx)
+        b.update(settings)
+        b.update(
+            enabled=bool(b.get("enabled", True)),
+            mode="Press/Release" if b.get("mode") == "Press-only" else b.get("mode") or "Hold",
+            min=max(0, min(100, int(b.get("min", 0)))),
+            max=max(0, min(100, int(b.get("max", 100)))),
+            tap_ms=clamp_tap_ms(b.get("tap_ms"), self._profile_tap_ms()),
+            min_hold_ms=clamp_hold_ms(b.get("min_hold_ms")),
+            settle_ms=clamp_settle_ms(b.get("settle_ms")),
+            macro=normalize_macro(b.get("macro")),
+            macro_repeat=bool(b.get("macro_repeat", False)),
+            comment=comment,
+            active=False,
+            last_tap=0.0,
+            last_on_ts=0.0,
+        )
+        fit_noback_to_direction(b)
+        self._reset_noback()
+        self._reset_settle()
+        box = self.slot_comments[idx]
+        box.blockSignals(True)
+        box.setText(comment)
+        box.blockSignals(False)
+        self._refresh_slot_btn(idx, force=True)
+        if idx == self.selected_index:
+            self._load_selected_into_qb()
+
+    def _set_bind_settle(self, idx, ms):
+        """Set one bind's Rebound time (0: off)."""
+        self._edited()
+        self.binds[idx]["settle_ms"] = clamp_settle_ms(ms)
+        self._reset_settle()
+        self._refresh_slot_btn(idx, force=True)
+
     def _refresh_bind_lines(self, idx):
         """The Bind button's lines: green along the top for its Bind Dir, white
         along the bottom for its NoBack, toward the way back (v108.161: the
@@ -1012,9 +1391,14 @@ class AxisPanel(QGroupBox):
         b = self.binds[idx]
         win = self.window()
         hovered, phase = getattr(win, "_title_was_hovered", False), getattr(win, "_title_phase", 0.0)
+        # v108.178: Rebound's bouncing dot (v108.179; a line before), at the end on the side(s) it works.
+        rebound = "".join(s for s in "+-" if self._settle_used(b, s)) if self._settle_ms(b) > 0 else ""
+        on = bind_enabled(b)  # v108.183: a bind that is switched off shows no lines and no dot
+        rebound = rebound if on else ""
         for attribute, kind, sides in (
-            ("_dir_line", BindDirSweep, DIRECTION_SIDES.get(b.get("direction"), "")),
-            ("_noback_glow", NoBackSweep, noback_names(b)),
+            ("_dir_line", BindDirSweep, DIRECTION_SIDES.get(b.get("direction"), "") if on else ""),
+            ("_noback_glow", NoBackSweep, noback_names(b) if on else ""),
+            ("_rebound_dot", ReboundBounce, rebound),
         ):
             line = getattr(btn, attribute, None)
             if line is None:
@@ -1026,6 +1410,14 @@ class AxisPanel(QGroupBox):
             line.set_wanted(bool(sides))
             if sides:
                 line.set_hover_phase(hovered, phase)
+        # v108.180: with the dot, blank space at both sides of the label, so
+        # the dot is clear of the text and the text stays centred.
+        try:
+            height = btn.minimumHeight() or btn.height()
+            room = math.ceil(ReboundBounce.room(height) - btn.margin() / 2.0) if rebound else 0
+            btn.set_side_space(room)
+        except (AttributeError, TypeError, RuntimeError):
+            pass
 
     def _dir_char(self, value):
         """'+' or '-' for the side of the axis value; None at centre."""
@@ -1036,7 +1428,12 @@ class AxisPanel(QGroupBox):
         return int(getattr(self.mainwin, "hys_pct", 3))
 
     def _min_hold_ms(self):
-        """Shortest time a Hold key stays down."""
+        """The profile's short guard for a Hold bind without a Min Hold of its own (60 ms).
+
+        It is passed by when the axis is well below the band's start, so a
+        quick flick can still let the key go at once; a bind's own Min Hold
+        (v108.187) cannot be passed by.
+        """
         return int(getattr(self.mainwin, "min_hold_ms", 60))
 
     def _hold_ignore_max(self):
@@ -1211,6 +1608,73 @@ class AxisPanel(QGroupBox):
             return self._noback_level > start and magnitude < self._noback_level
         return self._noback_prior_level > start
 
+    # ------------------------------------------------------------------
+    # Rebound, the rebound settle guard (v108.177): the spring's bounce is not a new push (settle.py).
+    # ------------------------------------------------------------------
+    _settle_guards = None  # (bind index, side) -> SettleGuard
+    _settle_held = frozenset()  # the binds Settle keeps quiet on this sample
+
+    @staticmethod
+    def _settle_ms(bind):
+        """A bind's Rebound time in ms (0: off)."""
+        return clamp_settle_ms(bind.get("settle_ms"))
+
+    @staticmethod
+    def _settle_used(bind, side=None):
+        """True when Rebound applies to the bind: a Tick, or NoBack on (on `side`, or on a side it has)."""
+        if bind.get("mode") == TICK_MODE:
+            return side is None or _covers(bind.get("direction"), side)
+        return any(noback_on(bind, s) for s in ([side] if side else "+-"))
+
+    def _band_start(self, bind):
+        """Where the bind starts: its Tick%, or its DZone% plus Min%."""
+        return self._tick_threshold(bind) if bind.get("mode") == TICK_MODE else self._bind_minimum(bind)
+
+    def _reset_settle(self):
+        """Forget every bind's Rebound state."""
+        self._settle_guards = {}
+        self._settle_held = frozenset()
+
+    def _advance_settle(self, side, magnitude):
+        """Take a new sample for every bind's rebound settle guard; the binds to keep quiet now.
+
+        Like NoBack's memory it follows the physical stroke, whether output
+        is allowed or not. On a centring sample a bind held on either side
+        stays held.
+        """
+        guards = self._settle_guards
+        if guards is None:
+            guards = self._settle_guards = {}
+        users = [
+            (idx, bind)
+            for idx, bind in enumerate(self.binds)
+            if bind_has_output(bind) and self._settle_ms(bind) > 0 and self._settle_used(bind)
+        ]
+        if not users:
+            guards.clear()
+            return frozenset()
+        now = time.perf_counter()
+        held, live = set(), set()
+        for s in "+-":
+            reach = magnitude if s == side else 0.0
+            bands = None
+            for idx, bind in users:
+                if not self._settle_used(bind, s):
+                    continue
+                if bands is None:
+                    bands = self._noback_bands(s)
+                start = self._band_start(bind)
+                higher = any(above > start and reached(reach) for above, reached in bands)
+                guard = guards.get((idx, s))
+                if guard is None:
+                    guard = guards[(idx, s)] = SettleGuard()
+                live.add((idx, s))
+                if guard.sample(now, reach, start, higher, self._settle_ms(bind)) and side in (None, s):
+                    held.add(idx)
+        for key in [key for key in guards if key not in live]:
+            del guards[key]  # a bind that no longer uses Rebound starts afresh
+        return frozenset(held)
+
     def _bind_minimum(self, bind):
         """Where a bind starts: its DZone% plus Min%, capped at 100."""
         return max(0, min(100, int(bind.get('dead', self.dead)) + int(bind['min'])))
@@ -1239,8 +1703,13 @@ class AxisPanel(QGroupBox):
         )
         if blocked and self._dir_ok(value, d):
             if mode == "Hold" and b["active"]:
+                if self._hold_kept(b):
+                    # v108.187: NoBack lets go on the way back, but not before
+                    # the bind's Min Hold: the key stays down until then.
+                    self._refresh_slot_btn(idx, in_range=True)
+                    return
                 self._send_combo(combo, False)
-                self._record(idx, NOBACK_UP)
+                self._record(idx, NOBACK_UP, self._held_ms(b))
             b["active"] = False
             self._refresh_slot_btn(idx, in_range=False)
             return
@@ -1263,7 +1732,11 @@ class AxisPanel(QGroupBox):
                 if d
                 else False
             )
-        if (not getattr(self.mainwin, 'activated', False)) and in_range and output:
+        # v108.177: Rebound keeps a bind that is not running from starting, as
+        # if its band were not entered (the spring's bounce after a higher band).
+        if in_range and not b["active"] and not self._free and idx in self._settle_held:
+            in_range = False
+        if not allow and in_range and output:
             self._pulse_bind_button(idx)
         self._refresh_slot_btn(idx, in_range=in_range)
         if not (allow and output):
@@ -1272,9 +1745,10 @@ class AxisPanel(QGroupBox):
                 self.stop_macros(idx)
                 b["active"] = False
             elif b.get("active") and mode in ("Hold", "Press/Release", "Press/Repeat"):
+                # Output is off (the Target, or another window in front): let go at once, Min Hold or not.
                 self._send_combo(combo, False)
                 if mode == "Hold":
-                    self._record(idx, UP)
+                    self._record(idx, UP, self._held_ms(b))
                 b["active"] = False
             return
         if mode == "Hold":
@@ -1290,16 +1764,26 @@ class AxisPanel(QGroupBox):
                 below_min = cur_abs_pct < max(0, eff_min - hys)
                 over_max_strict = (cur_abs_pct > max_val) and (not self._hold_ignore_max())
                 if (not dir_ok) or below_min or over_max_strict:
-                    min_guard_ok = (now - b.get("last_on_ts", now)) * 1000.0 >= self._min_hold_ms()
-                    well_below = cur_abs_pct < max(0, min_val - 2 * hys)
-                    if min_guard_ok or well_below:
+                    held_ms = self._held_ms(b, now)
+                    own = self._bind_hold_ms(b)
+                    if own > 0:
+                        # v108.187: the bind's own Min Hold. The key-up waits
+                        # until the key has been down that long, however far
+                        # the axis has gone back (checked on every sample:
+                        # the key is let go within one sample, 16 ms, of it).
+                        release = held_ms >= own
+                    else:
+                        min_guard_ok = held_ms >= self._min_hold_ms()
+                        well_below = cur_abs_pct < max(0, min_val - 2 * hys)
+                        release = min_guard_ok or well_below
+                    if release:
                         self._send_combo(combo, False)
-                        self._record(idx, UP)
+                        self._record(idx, UP, held_ms)
                         b["active"] = False
         elif mode == "Press/Release":
             if in_range and not b["active"]:
                 self._send_tap(combo, b.get("tap_ms"))
-                self._record(idx, TAP)
+                self._record(idx, TAP, self._bind_tap_ms(b))
                 b["active"] = True
             elif (not in_range) and b["active"]:
                 b["active"] = False
@@ -1308,13 +1792,13 @@ class AxisPanel(QGroupBox):
                 now = time.perf_counter()
                 if not b["active"]:
                     self._send_tap(combo, b.get("tap_ms"))
-                    self._record(idx, TAP)
+                    self._record(idx, TAP, self._bind_tap_ms(b))
                     b["last_tap"] = now
                     b["active"] = True
                 # v108.167: never sooner than its Tap Dwell plus the time the key must be up.
                 elif now - b["last_tap"] >= repeat_interval_ms(b["repeat_ms"], self._bind_tap_ms(b)) / 1000.0:
                     self._send_tap(combo, b.get("tap_ms"))
-                    self._record(idx, TAP)
+                    self._record(idx, TAP, self._bind_tap_ms(b))
                     b["last_tap"] = now
             elif b["active"]:
                 b["active"] = False
@@ -1352,13 +1836,15 @@ class AxisPanel(QGroupBox):
         if self.history is not None:  # Options > Axis History
             self._raw_val = val
             self.history.add_sample(val)
-        activated = getattr(self.mainwin, "activated", False)
-        if activated and self._motion_timer.isActive():
+        # v108.184: the border blinks whenever no keys are being sent, not only
+        # with the Target off (in Manual On it is always on).
+        self._sending = bool(allow)
+        if allow and self._motion_timer.isActive():
             self._stop_motion_flash()
         dead = self.dead / 100.0
         val_proc = 0.0 if abs(val) < dead else val
         self._show_value(val_proc)
-        if not activated and abs(val_proc) >= dead:
+        if not allow and abs(val_proc) >= dead:
             if not self._motion_timer.isActive():
                 self._motion_timer.start()
             self._motion_idle.start()
@@ -1371,9 +1857,12 @@ class AxisPanel(QGroupBox):
             self._advance_noback(dir_char, cur_abs_pct)
         else:
             self._noback_prior_level = self._noback_level
+        self._settle_held = self._advance_settle(dir_char, cur_abs_pct)
         self._starts = set()
+        self._reached_now = None
         for i in range(len(self.binds)):
             self._process_one(i, val_proc, allow, dir_char, prev_abs_pct, cur_abs_pct)
+        self._update_band_blink()
         if self.history is not None:  # Axis History: what output off and NoBack kept back
             if allow:
                 self._keep_dry_states()
@@ -1393,6 +1882,7 @@ class AxisPanel(QGroupBox):
     def clear_keys(self):
         """Release held keys, stop macros and clear active states."""
         self._reset_noback()
+        self._reset_settle()
         self.stop_macros()
         sender = getattr(self.mainwin, "_tap_sender", None)
         if sender is not None and not self._dry:
@@ -1408,14 +1898,40 @@ class AxisPanel(QGroupBox):
             self._refresh_slot_btn(i, in_range=False, force=True)
         self._last_side, self._last_pct = None, 0.0
 
+    # v108.185: the Bind buttons whose band is reached while no keys are being
+    # sent blink grey in step with the panel's border (_toggle_motion_flash).
+    # Before, each tick greyed the button and a timer 120 ms later restored it,
+    # so a button whose band was held flickered some sixty times a second.
+    _motion_flash_on = False
+    _reached_now = None  # the binds whose band is reached on this tick
+    _band_blink = frozenset()  # the binds blinking now
+
     def _pulse_bind_button(self, idx):
-        """Briefly grey a Bind button when its band is reached with output off."""
-        if self._dry or getattr(self.mainwin, 'activated', False):
+        """Note that a bind's band is reached while no keys are being sent: its button blinks."""
+        if self._dry or self._sending:
             return
-        btn = self.slot_btns[idx]
-        btn.setStyleSheet(self._style_gray)
-        # Back to its own style (selected, NoBack outline) after the flash.
-        QTimer.singleShot(120, lambda: btn.setStyleSheet(self._slot_style(idx)))
+        if self._reached_now is None:
+            self._reached_now = set()
+        self._reached_now.add(idx)
+
+    def _show_band_blink(self, idx, grey):
+        """Give a Bind button its blink's grey, or its own style back."""
+        try:
+            self.slot_btns[idx].setStyleSheet(self._style_gray if grey else self._slot_style(idx))
+        except (IndexError, RuntimeError):
+            pass
+
+    def _update_band_blink(self):
+        """After a tick: start the blink of the binds whose band is now reached, end it for the others."""
+        reached = frozenset(self._reached_now or ())
+        self._reached_now = None
+        if reached == self._band_blink:
+            return
+        for idx in self._band_blink - reached:
+            self._show_band_blink(idx, False)  # its band is left: its own style at once
+        for idx in reached - self._band_blink:
+            self._show_band_blink(idx, self._motion_flash_on)
+        self._band_blink = reached
 
     # ------------------------------------------------------------------
     # Tick mode: a one-way tap when the axis crosses Tick% moving outward.
@@ -1424,6 +1940,10 @@ class AxisPanel(QGroupBox):
     def _process_one(self, idx, value, allow, dir_char, prev_abs_pct, cur_abs_pct):
         """Run one bind for a new axis value: Tick here, every other mode in _process_bind."""
         b = self.binds[idx]
+        if not bind_enabled(b):  # v108.183: switched off, it takes no part
+            b["active"] = False
+            self._refresh_slot_btn(idx, in_range=False)
+            return None
         if b.get("mode") != TICK_MODE:
             return self._process_bind(idx, value, allow, dir_char, prev_abs_pct, cur_abs_pct)
         combo = b.get("combo")
@@ -1436,12 +1956,17 @@ class AxisPanel(QGroupBox):
         # out (it still counts as a band for the NoBack of the binds below it).
         # The Bind button lights while the axis is at or beyond the mark.
         in_range = dir_ok and cur_abs_pct >= threshold
-        if not getattr(self.mainwin, "activated", False) and in_range and combo:
+        if not allow and in_range and combo:
             self._pulse_bind_button(idx)
         self._refresh_slot_btn(idx, in_range=in_range)
         if allow and combo and crossed_tick and not b.get("active", False):
+            if not self._free and idx in self._settle_held:
+                # v108.177: the spring's bounce after a higher band: no tap,
+                # and none until the axis has gone back below Tick%.
+                b["active"] = True
+                return
             self._send_tap(combo, b.get("tap_ms"))  # fire once, on the outward crossing
-            self._record(idx, TAP)
+            self._record(idx, TAP, self._bind_tap_ms(b))
             b["active"] = True
             b["last_on_ts"] = time.perf_counter()
             return
@@ -1543,12 +2068,20 @@ class AxisPanel(QGroupBox):
             self.max_val.setText(f"{int(b.get('max', 100)):>3d}")
             self.dead_lbl.setText(f"DZone: {int(b.get('dead', self.dead)):>3d}%")
         # v108.166: Tap Dwell, greyed out for the modes that send no taps.
+        # v108.187: in Hold mode the line is the bind's Min Hold, with the same − / +.
         mode = b.get("mode", "Hold")
-        unused = mode not in TAPPING_MODES
-        self.tap_lbl.setText(tap_text(clamp_tap_ms(b.get("tap_ms"), self._profile_tap_ms())))
+        is_hold = mode == HOLD_MODE
+        unused = mode not in TAPPING_MODES and not is_hold
+        self._keep_tap_label_width()
+        if is_hold:
+            self.tap_lbl.setText(hold_text(self._bind_hold_ms(b)))
+        else:
+            self.tap_lbl.setText(tap_text(clamp_tap_ms(b.get("tap_ms"), self._profile_tap_ms())))
         for widget, is_button in ((self.tap_lbl, False), (self.tap_dec, True), (self.tap_inc, True)):
             _set_ghost(widget, unused, is_button)
             tip = getattr(widget, "_spnav_tip", "")
+            if is_hold and not is_button:
+                tip = QUICK_BIND_TIPS["hold"]
             widget.setToolTip(
                 f"Not used while Mode = {mode}" + (f"\n\n{tip}" if tip else "") if unused else tip
             )
@@ -1558,6 +2091,17 @@ class AxisPanel(QGroupBox):
         # NoBack (right-click a Bind button) applies to every mode, Tick
         # included; a Bind Dir change can put it in or out of effect.
         self._refresh_bind_lines(self.selected_index)
+
+    def _keep_tap_label_width(self):
+        """Room for the wider of "Tap Dwell: 200ms" and "Min Hold: 500ms", so the − / + beside
+        the line do not move when the Mode changes what the line shows (v108.187)."""
+        try:
+            metrics = self.tap_lbl.fontMetrics()
+            need = max(metrics.horizontalAdvance(text) for text in (tap_text(888), hold_text(888)))
+            if need > self.tap_lbl.minimumWidth():
+                self.tap_lbl.setMinimumWidth(need)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
 
     # ------------------------------------------------------------------
     # Profile data (per-bind DZone% and comments included)
@@ -1575,14 +2119,23 @@ class AxisPanel(QGroupBox):
             }
             if b.get("mode") in ("Press/Repeat", MACRO_MODE):
                 bc["repeat_ms"] = int(b.get("repeat_ms", 100))
-            if b.get("mode") in TAPPING_MODES:  # v108.166: its Tap Dwell
-                bc["tap_ms"] = clamp_tap_ms(b.get("tap_ms"), self._profile_tap_ms())
+            # v108.166: its Tap Dwell. v108.187: also kept for a bind in another
+            # mode when it is not the profile's, so trying Hold does not lose it.
+            tap_ms = clamp_tap_ms(b.get("tap_ms"), self._profile_tap_ms())
+            if b.get("mode") in TAPPING_MODES or tap_ms != self._profile_tap_ms():
+                bc["tap_ms"] = tap_ms
+            if self._bind_hold_ms(b) > 0:  # v108.187: its Min Hold (left out at 0)
+                bc["min_hold_ms"] = self._bind_hold_ms(b)
             if b.get("macro"):
                 bc["macro"] = normalize_macro(b["macro"])
                 bc["macro_repeat"] = bool(b.get("macro_repeat"))
             bc["comment"] = str(comment.text())  # what the bind's comment field shows
             bc["noback_plus"] = bool(b.get("noback_plus"))
             bc["noback_minus"] = bool(b.get("noback_minus"))
+            if self._settle_used(b):  # v108.177: its Rebound time
+                bc["settle_ms"] = self._settle_ms(b)
+            if not bind_enabled(b):  # v108.183: only a bind that is switched off says so
+                bc["enabled"] = False
             bc["dead"] = int(b.get("dead", self.dead))
             binds_out.append(bc)
         return {"dead": int(self.dead), "selected": int(self.selected_index), "binds": binds_out}
@@ -1594,7 +2147,9 @@ class AxisPanel(QGroupBox):
         dead-zone field names, NoBack for the whole axis, four binds.
         """
         self._reset_noback()
+        self._reset_settle()
         self.stop_macros()
+        bind_copy.forget_paste(self)  # v108.182: its binds are other binds now
         try:
             self.dead = int(cfg.get("dead", self.dead))
         except (TypeError, ValueError):
@@ -1615,6 +2170,11 @@ class AxisPanel(QGroupBox):
                         repeat_ms=int(s.get("repeat_ms", 100)),
                         # v108.166: older profiles have one Tap Dwell, for every bind.
                         tap_ms=clamp_tap_ms(s.get("tap_ms", self._profile_tap_ms()), self._profile_tap_ms()),
+                        # v108.187: older profiles have no Min Hold: 0, as before.
+                        min_hold_ms=clamp_hold_ms(s.get("min_hold_ms")),
+                        # v108.177: older profiles have no Rebound time: the default.
+                        settle_ms=clamp_settle_ms(s.get("settle_ms")),
+                        enabled=bool(s.get("enabled", True)),  # v108.183
                         macro=normalize_macro(s.get("macro")),
                         macro_repeat=bool(s.get("macro_repeat", False)),
                         dead=_read_dead_value(s, b.get("dead", self.dead)),
@@ -1635,6 +2195,9 @@ class AxisPanel(QGroupBox):
                     comment="",
                     repeat_ms=100,
                     tap_ms=self._profile_tap_ms(),
+                    min_hold_ms=HOLD_MS_DEFAULT,
+                    settle_ms=SETTLE_MS_DEFAULT,
+                    enabled=True,
                     active=False,
                     last_tap=0.0,
                     last_on_ts=0.0,

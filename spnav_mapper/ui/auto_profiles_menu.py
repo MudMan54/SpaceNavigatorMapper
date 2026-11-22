@@ -216,6 +216,11 @@ class AutoProfilesMixin:
         """Ask to switch to Manual On while the profile is being edited."""
         if self._get_auto_select_mode() != AutoModeCombo.MODE_AUTO_LOAD:
             return
+        # v108.178: a drop-down may still be open (a click on a setting leaves
+        # it open); the question cannot be answered behind it.
+        from .menu_autoclose import close_open_menus
+
+        close_open_menus()
         answer = QMessageBox.question(
             self, EDIT_WARNING_TITLE, EDIT_WARNING, QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
         )

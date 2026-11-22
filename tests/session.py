@@ -3,7 +3,8 @@
     python tests/session.py package <repo root>                      out.json [script] [sandbox root]
     python tests/session.py single  <SpaceNavigator_Mapper_..._Complete.py> out.json [script] [sandbox root]
 
-script: full (default), restart, restart_tray, tray_exit, fresh, tray.
+script: full (default), restart, restart_tray, tray_exit, fresh, tray, switch, v187, v189,
+v189_again (the next start in the sandbox v189 left).
 
 The whole app starts through bootstrap.launch() with a seeded configs/
 folder, then the script clicks, types and moves the axes. Every checkpoint
@@ -32,10 +33,15 @@ sys.path.insert(0, HERE)
 import fakeqt  # noqa: E402
 
 SBX_ROOT = sys.argv[5] if len(sys.argv) > 5 else os.path.join(tempfile.gettempdir(), "spnav_sbx")
-SBX = os.path.join(SBX_ROOT, f"{KIND}_{SCRIPT}")
-shutil.rmtree(SBX, ignore_errors=True)
-os.makedirs(SBX + "/configs")
-os.makedirs(SBX + "/logs")
+# "<script>_again": the next start in the sandbox <script> left (its configs/ as it exited).
+AGAIN = SCRIPT.endswith("_again")
+SBX = os.path.join(SBX_ROOT, f"{KIND}_{SCRIPT[:-6] if AGAIN else SCRIPT}")
+if AGAIN:
+    shutil.rmtree(SBX + "/spnav_mapper", ignore_errors=True)
+else:
+    shutil.rmtree(SBX, ignore_errors=True)
+    os.makedirs(SBX + "/configs")
+    os.makedirs(SBX + "/logs")
 os.environ["LOCALAPPDATA"] = SBX + "/logs"
 for k in ("QT_SCREEN_SCALE_FACTORS", "SPNAV_AUTO_SCREEN_FACTORS", "SPNAV_UI_SCALE"):
     os.environ.pop(k, None)
@@ -170,7 +176,7 @@ def _seed():
         )
 
 
-if SCRIPT != "fresh":
+if SCRIPT != "fresh" and not AGAIN:
     _seed()
 
 env = fakeqt.install()
@@ -347,6 +353,47 @@ def probe(win):
             "lane_min_height": window.lanes[0].minimumHeight() if window and window.lanes else None,
             "size": [window.width(), window.height()] if window else None,
         }
+        if window is not None and hasattr(window, "time_bar"):  # v108.187
+            frame = win.frameGeometry()
+            texts = (
+                [s[3] for s in window.shapes(window.lanes[0].axes, 800, 400) if s[0] == "text"]
+                if window.lanes
+                else []
+            )
+            out["axis_history"].update(
+                {
+                    "attached": window.attached(),
+                    "pos": [window.x(), window.y()],
+                    "editor_frame": [frame.x(), frame.y(), frame.width(), frame.height()],
+                    "editor_pos": [win.x(), win.y()],
+                    "editor_size": [win.width(), win.height()],
+                    "scroll": [window.time_bar.value(), window.time_bar.maximum(), window.ago()],
+                    "paused": window.paused_at is not None,
+                    "times": texts[-3:],
+                    "dot_labels": [t for t in texts if " tap" in t or " down" in t or " up" in t],
+                    "keys": [
+                        [row["axis"], row["bind"] + 1, row["key"], row["what"], row["sent"]]
+                        for row in window.key_rows()
+                    ],
+                    "keys_rows": window.keys_label.text().count("<tr>"),
+                    "legend": [window.legend_btn.isChecked(), not window.hint_label.isHidden()],
+                    "buttons": [b.text() for b in window.findChildren(fakeqt.QPushButton)],
+                }
+            )
+    if getattr(win, "_v187", None):
+        out["v187"] = json.loads(json.dumps(win._v187, default=repr))
+    if hasattr(win, "profile_note"):  # v108.187: the profile's note and the profile name's colour
+        tray = getattr(win, "_tray", None)
+        out["note"] = {
+            "text": win.profile_note,
+            "important": win.profile_note_important,
+            "seen": win._note_seen,
+            "flashing": win._note_flash_timer.isActive(),
+            "colour": win.profile_display._name_colour,
+            "sheet": win.profile_display.styleSheet(),
+            "tip": win.profile_display.toolTip().splitlines()[0],
+            "tray": tray.toolTip() if tray is not None else None,
+        }
     prompt = getattr(win, "_save_reload_probe", None)
     if prompt is not None:  # v108.148: the Save/Reload prompt last shown
         out["save_reload"] = prompt
@@ -406,12 +453,253 @@ def step(label, fn, settle=300):
         CHECKPOINTS[-1]["step_failure"] = traceback.format_exc().splitlines()[-1]
 
 
+ARRIVED_NOTE = "Bind Prone to Ctrl (Hold) in the game.\nRun the Mapper as Administrator."
+
+
+def v187(W):
+    """v108.187: Min Hold, the profile's note, and the Axis History window beside the editor."""
+    from fakeqt import QPushButton, find_action, find_widget
+
+    notes = sys.modules["spnav_mapper.ui.profile_note_dialog"]
+    game, other = SBX + "/configs/game.json", SBX + "/configs/notes.json"
+    W()._v187 = {}
+
+    def save_reload():
+        dialogs = sys.modules["spnav_mapper.ui.save_reload_dialog"].SaveReloadDialog
+        saved_exec, dialogs.exec_ = dialogs.exec_, lambda dialog: 1
+        try:
+            find_widget(W().centralWidget(), QPushButton, text="Save/Reload").click()
+        finally:
+            dialogs.exec_ = saved_exec
+
+    # --- Min Hold: the Tap Dwell line of a Hold bind ---
+    def min_hold():
+        z = W().axes["Z"]
+        z._select_slot(0)  # E: Hold, + side, from 15% (DZone 5 + Min 10) to 40%
+        probe = {
+            "label": z.tap_lbl.text(),
+            "enabled": [z.tap_lbl.isEnabled(), z.tap_dec.isEnabled(), z.tap_inc.isEnabled()],
+            "tip": z.tap_lbl.toolTip().split(":")[0],
+            "saved at 0": "min_hold_ms" in z.get_config()["binds"][0],
+        }
+        for _ in range(120):
+            z.tap_inc.click()
+        probe["at the top"] = [z.tap_lbl.text(), z.binds[0]["min_hold_ms"]]
+        for _ in range(65):
+            z.tap_dec.click()
+        probe["set"] = [
+            z.tap_lbl.text(),
+            z.binds[0]["min_hold_ms"],
+            z.get_config()["binds"][0]["min_hold_ms"],
+        ]
+        probe["button tip"] = [t for t in z.slot_btns[0].toolTip().splitlines() if t.startswith("Min Hold")]
+        z.qb_mode.choose("Tick")
+        probe["tick"] = [z.tap_lbl.text(), z.tap_lbl.toolTip().split(":")[0]]
+        z.qb_mode.choose("Release-only")
+        probe["release-only"] = [z.tap_lbl.isEnabled(), z.tap_lbl.toolTip().splitlines()[0]]
+        z.qb_mode.choose("Hold")
+        probe["hold again"] = z.tap_lbl.text()
+        probe["tap dwell untouched"] = z.binds[0]["tap_ms"]
+        probe["others"] = [b.get("min_hold_ms") for b in z.get_config()["binds"][1:]]
+        W()._v187["min hold"] = probe
+
+    def flick():
+        # Z in E's band for an instant: about 29% for one sample, then back to rest.
+        env.hid.push_axes(0, 0, 100, 0, 0, 0)
+        env.advance(16)
+        env.hid.push_axes(0, 0, 0, 0, 0, 0)
+        env.advance(600)
+
+    step("min hold: quick bind", min_hold)
+    step("min hold: a flick", flick)
+    step("min hold: save/reload", save_reload, 400)
+
+    # --- The profile's note ---
+    step("note: none yet", lambda: None)
+    step(
+        "note: saved, important",
+        lambda: notes.save_note(
+            W(), "Set Prone to Hold in the game.\r\nRun the Mapper as Administrator.  ", True
+        ),
+    )
+
+    def load_other_then_game():
+        W()._load_config_from_path(other)
+        W()._load_config_from_path(game)
+        colours = []
+        for _ in range(4):
+            colours.append(W().profile_display._name_colour)
+            env.advance(500)
+        W()._v187["flash colours"] = colours
+
+    def note_arrives(text):
+        # As a shared profile brings it: the note is in the file, and was never opened on this PC.
+        def run():
+            pure = sys.modules["spnav_mapper.profile_note"]
+            pure.write_note_to_profile(game, text, True, SBX + "/configs/backups")
+            load_other_then_game()
+
+        return run
+
+    # v108.189: written here, it is read here, at later loads too.
+    step("note: loaded again, still read", load_other_then_game)
+    step("note: another arrives with the profile, it flashes", note_arrives(ARRIVED_NOTE))
+    step("note: opened from Options", lambda: find_action(W(), "Options", "Profile Note…").trigger())
+    step("note: save/reload, still read", save_reload, 400)
+    step("note: loaded once more, still read", load_other_then_game)
+
+    def click_the_flashing_name():
+        note_arrives(ARRIVED_NOTE + "\nAnd bind Prone to Ctrl.")()
+        W().profile_display.mousePressEvent(None)
+
+    step("note: a click on the flashing name opens it", click_the_flashing_name)
+    step("note: right-click opens it", lambda: W().profile_display.contextMenuEvent(None))
+
+    def dialog_saves():
+        dialog = notes.ProfileNoteDialog(W())
+        W()._v187["dialog"] = [
+            dialog.windowTitle(),
+            dialog.text_edit.toPlainText(),
+            dialog.important_chk.isChecked(),
+            dialog.where.text(),
+        ]
+        # v108.188: the whole window in the drop-downs' font.
+        menu_font = sys.modules["spnav_mapper.ui.window_chrome"].dropdown_font(W()).pointSizeF()
+        W()._v187["dialog fonts"] = {
+            "menu": round(menu_font, 2),
+            "controls": sorted(
+                {round(w.font().pointSizeF(), 2) for w in dialog.findChildren(fakeqt.QWidget)}
+            ),
+            "text": round(dialog.text_edit.font().pointSizeF(), 2),
+            "sheet": dialog.styleSheet(),
+            "text sheet": dialog.text_edit.styleSheet().split("padding:4px; ")[1],
+        }
+        dialog.text_edit.setPlainText("Only a remark.")
+        dialog.important_chk.setChecked(False)
+        dialog.save()
+
+    step("note: changed in its dialog, not important", dialog_saves)
+    step("note: removed", lambda: notes.save_note(W(), "   ", True))
+
+    # --- Axis History beside the editor ---
+    def paint():
+        window = W()._axis_history_window
+        window.refresh()
+        for lane in window.lanes:
+            lane.paintEvent(None)
+
+    def history_on():
+        find_action(W(), "Options", "Axis History").trigger()
+        env.advance(300)  # joined again once shown
+        stroke(0, [0, 300, 0, -250, 0])
+        W()._axis_history_window.set_axes(["X", "Z"])
+        flick()
+        paint()
+
+    def pause():
+        W()._axis_history_window.toggle_pause()
+        paint()
+
+    def scroll_back():
+        bar = W()._axis_history_window.time_bar
+        bar.setValue(bar.minimum())
+        paint()
+
+    def editor_moved():
+        # Moved by hand while the window is open: the window stays beside it, the place is remembered.
+        W().move(200, 60)
+        fakeqt.send_event(W(), "Move")
+
+    def editor_resized():
+        W().resize(W().width() - 40, W().height() - 100)
+        fakeqt.send_event(W(), "Resize")
+
+    def press(mask):
+        # A press and release of the puck's Button 1 (mask 1) or Button 2 (mask 2).
+        env.hid.push_buttons(mask)
+        env.advance(100)
+        env.hid.push_buttons(0)
+        env.advance(100)
+
+    def export():
+        fakeqt.QFileDialog.ANSWERS = [SBX + "/configs/capture"]
+        W()._axis_history_window.export()
+
+    def open_history():
+        find_action(W(), "Options", "Axis History").trigger()
+        env.advance(300)
+
+    step("history: attached to the editor", history_on)
+    step("history: paused, the dots labelled", pause)
+    step("history: scrolled back", scroll_back)
+    step("history: resumed", pause)
+    # v108.188: the puck's Button 1 freezes and resumes while the window is open.
+    step("history: Button 1 freezes", lambda: press(1))
+    step("history: Button 1 again resumes", lambda: press(1))
+    step("history: Button 1 a third time freezes", lambda: press(1))  # v108.189: and so on
+    step("history: Button 1 a fourth time resumes", lambda: press(1))
+    step("history: Button 2 is its bind's", lambda: press(2))
+    step("history: exported", export)
+    step("history: legend", lambda: W()._axis_history_window.legend_btn.click())
+    step("history: the editor moved", editor_moved)
+    step("history: closed", lambda: W()._axis_history_window.close())
+    step("history: Button 1 is its bind's again", lambda: press(1))
+    step("history: opened again", open_history)
+    step("history: the editor resized", editor_resized)
+    step("history: not attached", lambda: W()._axis_history_window.attach_check.setChecked(False))
+    step("history: attached again", lambda: W()._axis_history_window.attach_check.setChecked(True))
+    step("history: closed again", lambda: W()._axis_history_window.close())
+    step("history: open at exit", open_history)  # the editor is aside; the Mapper exits like that
+    step("exit", lambda: find_action(W(), "Options", "Exit SpaceNavigator Mapper").trigger(), 500)
+
+
+def v189(W):
+    """v108.189: an opened note stays read at the next start; Axis History open at exit."""
+    from fakeqt import find_action
+
+    pure = sys.modules["spnav_mapper.profile_note"]
+    game, other = SBX + "/configs/game.json", SBX + "/configs/notes.json"
+
+    def note_arrives(text):
+        def run():
+            pure.write_note_to_profile(game, text, True, SBX + "/configs/backups")
+            W()._load_config_from_path(other)
+            W()._load_config_from_path(game)
+
+        return run
+
+    def open_history():
+        find_action(W(), "Options", "Axis History").trigger()
+        env.advance(300)
+
+    if SCRIPT == "v189":
+        step("note: arrives with the profile, it flashes", note_arrives(ARRIVED_NOTE))
+        step("note: opened", lambda: find_action(W(), "Options", "Profile Note…").trigger())
+
+        def positions_saved():
+            placement = sys.modules["spnav_mapper.ui.placement"]
+            placement.set_positions_monitor(W(), fakeqt.QGuiApplication.primaryScreen())
+
+        step("positions saved: this monitor", positions_saved)
+        step("editor: moved", lambda: W().move(300, 31))
+        step("history: open at exit", open_history)  # the editor is aside; the Mapper exits like that
+    else:
+        # The next start: the note opened before the exit is read; Axis History is open again.
+        step("history: closed", lambda: W()._axis_history_window.close())
+        step("note: another arrives, it flashes", note_arrives(ARRIVED_NOTE + "\nAnd bind Prone to Ctrl."))
+    step("exit", lambda: find_action(W(), "Options", "Exit SpaceNavigator Mapper").trigger(), 500)
+
+
 def session(app):
     from fakeqt import QPushButton, QRect, QScreen, find_action, find_widget
 
     W = env.main_window
     env.advance(1500)
     checkpoint("startup")
+    if SCRIPT == "v187":
+        return v187(W)
+    if SCRIPT in ("v189", "v189_again"):
+        return v189(W)
     if SCRIPT == "tray":
         step(
             "restore from login tray",
@@ -666,8 +954,9 @@ def session(app):
             "tap_ms" in x.get_config()["binds"][x.selected_index] if was == "Hold" else None
         )
         tap["grid"] = [x.tap_lbl.text(), x.dead_lbl.text()]
-        # v108.168: greyed out, a − / + keeps its sign's size.
-        x.qb_mode.choose("Hold")
+        # v108.168: greyed out, a − / + keeps its sign's size. (v108.187: in Release-only;
+        # in Hold the line is the bind's Min Hold.)
+        x.qb_mode.choose("Release-only")
         tap["ghost glyph"] = [
             "font-size:" in x.tap_dec.styleSheet(),
             "rgba(75,85,99,0.5)" in x.tap_dec.styleSheet(),
@@ -830,7 +1119,7 @@ def session(app):
         window = W()._axis_history_window
         window.set_axes(["X", "Ry"])
         fakeqt.QFileDialog.ANSWERS = [SBX + "/configs/x_history.csv"]
-        window.save_csv()
+        window.export()  # v108.187: the CSV and, beside it, the chart report
 
     def history_together():
         # v108.155: the axes shown on one graph

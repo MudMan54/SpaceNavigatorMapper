@@ -7,8 +7,12 @@ the title (a click minimizes the window).
 Bind buttons have two lines driven by the same timer: white along the bottom
 for NoBack (NoBackSweep) and green along the top for the Bind Dir
 (BindDirSweep). Each sweeps from the middle while the pointer is over the
-window and rests at full length otherwise.
+window and rests at full length otherwise. v108.178: a bind with Rebound has
+an amber dot at its end (ReboundBounce) that falls from the top and bounces on
+the bottom like a ball let go, each bounce lower, and comes to rest there.
 """
+
+import math
 
 from PyQt5.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
 from PyQt5.QtGui import (
@@ -221,8 +225,80 @@ class BindDirSweep(SweepLine):
     RGB = (34, 197, 94)  # #22c55e
 
 
+class ReboundBounce(SweepLine):
+    """An amber dot at the end of a Bind button on its Rebound side(s), bouncing like a ball let go.
+
+    "+": the right end; "-": the left end (the beginning); "+-": both. While
+    the pointer is over the window the dot starts at the top, by the Bind Dir
+    line, falls to the bottom and bounces off it, each bounce lower, like the
+    puck's spring after it is let go; then it rests at the bottom, fades, and
+    starts again (one round with each lap of the title's timer, about 2.7 s).
+    Otherwise it rests at the bottom. v108.179: a dot bouncing up and down (in
+    the v108.178 test an upright line moved sideways).
+    """
+
+    RGB = (245, 158, 11)  # #f59e0b
+    BOUNCES = 4
+    BOUNCE_SHARE = 0.72  # of each lap spent bouncing; the rest it stays at the bottom, fading
+
+    def bounce(self):
+        """(height above the bottom as a share of the drop, alpha) for the current phase."""
+        if not self._hover_on:
+            return 0.0, 170
+        t = self._phase % 1.0
+        if t < self.BOUNCE_SHARE:
+            u = t / self.BOUNCE_SHARE
+            # A ball let go: down to the bottom and up again, BOUNCES times, lower each time.
+            return abs(math.cos(math.pi * self.BOUNCES * u)) * (1.0 - u) ** 1.5, 255
+        fade = (t - self.BOUNCE_SHARE) / (1.0 - self.BOUNCE_SHARE)
+        return 0.0, int(255 - 195 * fade)
+
+    GAP = 3.0  # between the dot and the button's label
+
+    @staticmethod
+    def radius(height):
+        """The dot's radius on a button `height` pixels high."""
+        return max(2.5, float(height) * 0.09)
+
+    @staticmethod
+    def edge(height):
+        """How far the dot stays from the end of the button."""
+        return max(5.0, float(height) * 0.12)
+
+    @classmethod
+    def room(cls, height):
+        """The width the dot takes at an end of a button `height` high, its gap to the label included."""
+        return cls.edge(height) + 2.0 * cls.radius(height) + cls.GAP
+
+    def spots(self):
+        """Where the dot is now: [(x, y, radius)] for each side, in the button's pixels."""
+        w, h = float(self.width()), float(self.height())
+        if not self._sides or w < 18 or h < 10:
+            return []
+        height, _alpha = self.bounce()
+        radius = self.radius(h)
+        edge = self.edge(h)
+        top, bottom = h * 0.27, h * 0.73  # between the Bind Dir line and the NoBack line
+        y = bottom - (bottom - top) * height
+        return [((w - edge - radius) if side == "+" else (edge + radius), y, radius) for side in self._sides]
+
+    def paintEvent(self, _event):
+        """Paint the dot at its current height at each end."""
+        spots = self.spots()
+        if not spots:
+            return
+        _height, alpha = self.bounce()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(*self.RGB, alpha)))
+        for x, y, radius in spots:
+            painter.drawEllipse(QPointF(x, y), radius, radius)
+        painter.end()
+
+
 # Bind button attributes holding its lines (axis_panel._refresh_bind_lines).
-LINE_ATTRIBUTES = ("_noback_glow", "_dir_line")
+LINE_ATTRIBUTES = ("_noback_glow", "_dir_line", "_rebound_dot")
 
 
 def _noback_glows(win):

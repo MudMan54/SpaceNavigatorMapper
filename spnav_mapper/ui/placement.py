@@ -209,6 +209,12 @@ def save_window_placement(win):
     chosen = positions_monitor()
     win._shared_monitor = dict(chosen) if chosen else screen_record(screen)
     _write_state(win)
+    # v108.189: in the start-up log, to compare with where the next start puts it.
+    _note(
+        f"Saved the editor's position on {screen.name()}: {relative[0]},{relative[1]} from its "
+        f"work area, {g.width()}x{g.height()} (Positions Saved: "
+        f"{chosen['screen_name'] if chosen else 'none checked'})"
+    )
 
 
 def _write_state(win):
